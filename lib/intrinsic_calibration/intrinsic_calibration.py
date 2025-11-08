@@ -33,7 +33,7 @@ img_shape = None # To store the image shape
 
 # Get a list of all calibration images
 # Assumes images are in a folder named 'calibration_images'
-images = glob.glob('calibration_images/*.jpeg')
+images = glob.glob('calibration_images/*.png')
 
 if not images:
     print("Error: No images found in 'calibration_images/' folder.")
