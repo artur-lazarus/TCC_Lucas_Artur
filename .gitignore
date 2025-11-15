@@ -1,4 +1,10 @@
 .vscode/
+.venv/
 build/
+*.DS_Store*
 video.avi
-.DS_Store
+__pycache__
+*.mp4
+*.jpg
+*.png
+*.jpeg

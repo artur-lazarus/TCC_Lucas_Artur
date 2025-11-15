@@ -9,6 +9,11 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # Find OpenCV
 find_package(OpenCV REQUIRED)
 
+# Find libcamera via pkg-config and threads
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(LIBCAMERA REQUIRED IMPORTED_TARGET libcamera)
+find_package(Threads REQUIRED)
+
 # Add include directories
 include_directories(
     ${CMAKE_SOURCE_DIR}/include
@@ -24,7 +29,11 @@ file(GLOB_RECURSE SOURCES
 add_executable(tcc ${SOURCES})
 
 # Link libraries
-target_link_libraries(tcc PRIVATE ${OpenCV_LIBS})
+target_link_libraries(tcc PRIVATE
+    PkgConfig::LIBCAMERA
+    Threads::Threads
+    ${OpenCV_LIBS}
+)
 
 # Compiler warnings
 target_compile_options(tcc PRIVATE
@@ -33,4 +42,6 @@ target_compile_options(tcc PRIVATE
 
 # Print configuration info
 message(STATUS "OpenCV version: ${OpenCV_VERSION}")
+message(STATUS "libcamera cflags: ${LIBCAMERA_CFLAGS}")
+message(STATUS "libcamera libs: ${LIBCAMERA_LIBRARIES}")
 message(STATUS "Source files: ${SOURCES}")
