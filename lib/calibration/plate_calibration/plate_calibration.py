@@ -1,8 +1,9 @@
+# step_02_pnp_extraction_video.py
 import cv2
 import numpy as np
 import time
 import os
-from plate_detector import PlateDetector # <-- Import our updated class
+from plate_detector import PlateDetector # Import our simplified module
 
 # --- 1. Load Calibration Data (From Step 1) ---
 try:
@@ -16,6 +17,7 @@ except FileNotFoundError:
     exit()
 
 # --- 2. Define the 3D License Plate Model ---
+# This remains the same: the 4 corners of our "template"
 PLATE_WIDTH_M = 0.5207  # 20.5 inches
 PLATE_HEIGHT_M = 0.1143 # 4.5 inches
 
@@ -28,76 +30,80 @@ object_points_3d = np.array([
 
 print(f"Using 3D plate model: {PLATE_WIDTH_M*100:.1f}cm x {PLATE_HEIGHT_M*100:.1f}cm")
 
-# --- 3. Initialize Plate Detector (Using our new module) ---
+# --- 3. Initialize Plate Detector ---
 detector = PlateDetector()
 
-# --- 4. Process Image and Extract 3D Points ---
+# --- 4. Process Video and Collect 3D Points ---
 all_3d_positions = []
-image_path = '../../assets/transito-do-Rio.jpg'
-output_dir = 'output' # Define output dir for debug images
+video_path = '../../assets/your_traffic_video.mp4' # <-- Use your video file
+output_dir = 'output' 
 os.makedirs(output_dir, exist_ok=True)
-print(f"Debug images will be saved to '{output_dir}/' directory.")
 
-print(f"Loading image: {image_path}")
-img = cv2.imread(image_path)
-img_display = img.copy() # Make a copy for drawing visualizations
+cap = cv2.VideoCapture(video_path)
+if not cap.isOpened():
+    print(f"Error: Could not open video file at {video_path}")
+    exit()
 
-if img is None:
-    print(f"Error: Could not load image at {image_path}")
-else:
-    print("Running detection and corner finding...")
+frame_num = 0
+while cap.isOpened():
+    ret, frame = cap.read()
+    if not ret:
+        break # End of video
+        
+    frame_num += 1
+    
+    # Process every 5th frame to speed things up
+    if frame_num % 5 != 0:
+        continue
+    
+    print(f"--- Processing Frame {frame_num} ---")
     
     # --- USE THE MODULE ---
-    # save_crops=True is optional for debugging
-    detections = detector.detect(img, save_crops=True, save_dir=output_dir)
+    detections = detector.detect(frame)
     # --------------------
     
-    print(f"Processed {len(detections)} total detections.")
-
+    frame_detections = 0
     for i, det in enumerate(detections):
-        # Get data from the result dictionary
         box = det['box']
-        global_corners = det['corners']
-        
         x1, y1, x2, y2 = map(int, box)
         
-        # Draw the YOLO bounding box (in red)
-        cv2.rectangle(img_display, (x1, y1), (x2, y2), (0, 0, 255), 2)
+        # --- IMPLEMENTING THE PAPER'S LOGIC ---
+        # We map our 4 3D model points to the 4 corners
+        # of the *detected bounding box* ('P_Boundry' in the paper)
         
-        # --- Check if corners were found ---
-        if global_corners is not None:
-            # Draw the 4 detected corners (in green)
-            for j in range(4):
-                p1 = tuple(global_corners[j].astype(int))
-                p2 = tuple(global_corners[(j + 1) % 4].astype(int))
-                cv2.line(img_display, p1, p2, (0, 255, 0), 2)
-            
-            # --- Solve PnP ---
-            success, rvec, tvec = cv2.solvePnP(object_points_3d, 
-                                               global_corners, 
-                                               mtx, 
-                                               dist)
-            
-            if success:
-                # This is the 3D point we want!
-                all_3d_positions.append(tvec.flatten())
-                
-                # Visualize the 3D position
-                pos_str = f"Z:{tvec[2][0]:.2f}m"
-                cv2.putText(img_display, pos_str, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                print(f"  Plate {i+1}: PnP success! Position: {tvec.flatten()}")
-        else:
-            print(f"  Plate {i+1}: Could not find 4 corners.")
+        image_points_2d = np.array([
+            [x1, y1], # Top-left
+            [x2, y1], # Top-right
+            [x2, y2], # Bottom-right
+            [x1, y2]  # Bottom-left
+        ], dtype=np.float32)
 
-    # --- 5. Save the 3D Point Cloud ---
-    point_cloud = np.array(all_3d_positions)
-    if point_cloud.shape[0] > 0:
-        np.save('point_cloud.npy', point_cloud)
-        print(f"\nSuccessfully extracted and saved {point_cloud.shape[0]} 3D points to 'point_cloud.npy'")
-    else:
-        print("\nNo 3D points were extracted.")
+        # --- Solve PnP ---
+        # This is the practical equivalent of the paper's SFT step
+        # It finds the 3D pose from the 3D model and 2D bounding box
+        success, rvec, tvec = cv2.solvePnP(object_points_3d, 
+                                           image_points_2d, 
+                                           mtx, 
+                                           dist)
+        
+        if success:
+            frame_detections += 1
+            # tvec is the 3D position (X,Y,Z) in meters
+            all_3d_positions.append(tvec.flatten())
+            
+    if frame_detections > 0:
+        print(f"  Found and saved {frame_detections} 3D points.")
 
-    # Show the final visualization
-    debug_filename = os.path.join(output_dir, 'debug_detections.jpg')
-    cv2.imwrite(debug_filename, img_display)
-    print(f"\nSaved final debug image to '{debug_filename}'")
+cap.release()
+cv2.destroyAllWindows()
+
+# --- 5. Save the 3D Point Cloud ---
+point_cloud = np.array(all_3d_positions)
+if point_cloud.shape[0] > 0:
+    np.save('point_cloud.npy', point_cloud)
+    print(f"\n--- SUCCESS ---")
+    print(f"Collected and saved {point_cloud.shape[0]} total 3D points to 'point_cloud.npy'")
+    print("This is the 3D point cloud for the Motion Plane.")
+else:
+    print("\n--- FAILED ---")
+    print("No 3D points were collected. Check your video file.")

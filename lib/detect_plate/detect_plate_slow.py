@@ -11,9 +11,13 @@ class PlateDetector:
     A class to load the YOLOv5 license plate detector 
     and run inference.
     """
-    def __init__(self, model_name='keremberke/yolov5m-license-plate'):
+    def __init__(self, model_name='keremberke/yolov5m-license-plate', conf_threshold=0.25):
         """
         Initializes and loads the YOLOv5 model.
+        
+        Args:
+            model_name (str): YOLOv5 model name
+            conf_threshold (float): NMS confidence threshold (default: 0.25)
         """
         print("Initializing Plate Detector...")
         
@@ -38,10 +42,10 @@ class PlateDetector:
         torch.load = original_load
 
         # Set model parameters
-        self.model.conf = 0.25  # NMS confidence threshold
+        self.model.conf = conf_threshold  # NMS confidence threshold
         self.model.iou = 0.45   # NMS IoU threshold
         self.model.max_det = 20 # Maximum detections per image
-        print("Plate Detector initialized and ready.")
+        print(f"Plate Detector initialized with conf_threshold={conf_threshold}")
 
     def detect(self, img, size=640, save_crops=False, save_dir='output'): # <-- ADDED ARGS
         """
