@@ -1,5 +1,7 @@
 import cv2
 import numpy as np
+import os
+from ultralytics import YOLO
 
 def detect_foreground_value_based(frames, background_image, threshold_value=15):
     """
@@ -153,3 +155,88 @@ def detect_foreground_value_based_normalized(
         masks.append(mask)
 
     return masks
+
+def detect_foreground_yolo_segmentation(
+    frames,
+    conf_threshold=0.25,
+    iou_threshold=0.7
+):
+    """
+    "Goes Nuts" background subtraction using YOLOv8 segmentation.
+    
+    Uses YOLOv8l-seg.pt to detect and segment vehicles (cars, motorcycles, buses, trucks),
+    creating foreground masks based on the segmentation results.
+    
+    Args:
+        frames: list of BGR frames to process.
+        model_path: path to YOLOv8 segmentation model (.pt file).
+        conf_threshold: confidence threshold for detections (0-1).
+        iou_threshold: IoU threshold for NMS (0-1).
+    
+    Returns:
+        List of uint8 foreground masks (255=foreground, 0=background).
+    """
+    # Load YOLOv8 segmentation model
+    THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+    LIB_ROOT = os.path.join(THIS_DIR, "..")
+    model = YOLO(os.path.join(LIB_ROOT, "models", 'yolov8l-seg.pt'))
+    
+    # Vehicle classes in COCO: car (2), motorcycle (3), bus (5), truck (7)
+    vehicle_classes = [2, 3, 5, 7]
+    
+    foreground_masks = []
+    for frame in frames:
+        # Run YOLOv8 segmentation
+        results = model.predict(
+            frame,
+            conf=conf_threshold,
+            iou=iou_threshold,
+            classes=vehicle_classes,
+            verbose=False
+        )
+        
+        # Create blank mask
+        h, w = frame.shape[:2]
+        mask = np.zeros((h, w), dtype=np.uint8)
+        
+        # Extract segmentation masks and bounding boxes from results
+        if results and len(results) > 0:
+            result = results[0]
+            if result.masks is not None and result.boxes is not None:
+                # Get the segmentation masks and bounding boxes
+                masks_data = result.masks.data.cpu().numpy()
+                boxes = result.boxes.xyxy.cpu().numpy()
+                
+                # Process each detected object
+                for mask_data, box in zip(masks_data, boxes):
+                    # Resize mask to frame size if needed
+                    if mask_data.shape != (h, w):
+                        mask_resized = cv2.resize(
+                            mask_data, (w, h), 
+                            interpolation=cv2.INTER_LINEAR
+                        )
+                    else:
+                        mask_resized = mask_data
+                    
+                    # Threshold to get binary mask
+                    binary_mask = (mask_resized > 0.5).astype(np.uint8) * 255
+                    
+                    # Crop mask to bounding box
+                    x1, y1, x2, y2 = box.astype(int)
+                    # Clamp box coordinates to frame bounds
+                    x1, y1 = max(0, x1), max(0, y1)
+                    x2, y2 = min(w, x2), min(h, y2)
+                    
+                    # Create bounding box mask
+                    bbox_mask = np.zeros((h, w), dtype=np.uint8)
+                    bbox_mask[y1:y2, x1:x2] = 255
+                    
+                    # Apply bounding box crop to segmentation
+                    cropped_mask = cv2.bitwise_and(binary_mask, bbox_mask)
+                    
+                    # Add to combined mask
+                    mask = cv2.bitwise_or(mask, cropped_mask)
+        
+        foreground_masks.append(mask)
+    
+    return foreground_masks

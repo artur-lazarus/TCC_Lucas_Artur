@@ -662,8 +662,8 @@ if __name__ == "__main__":
     vp_u_path = os.path.join(THIS_DIR, "vp_u.npy") 
     
     # Frame range parameters
-    skip_frames = 5000  # Number of frames to skip at the beginning
-    frame_limit = 5000  # Number of frames to process after skipping
+    skip_frames = 0  # Number of frames to skip at the beginning
+    frame_limit = 500  # Number of frames to process after skipping
     
     show_video_realtime = True
     # Set to a frame number to analyze *only* that frame (relative to skipped frames)
@@ -674,11 +674,11 @@ if __name__ == "__main__":
     show_vanishing_points = False
     
     # Background loading: Set to path to load existing background, or None to generate from frames
-    load_background_path = os.path.join(THIS_DIR, "background_frames_5000_to_6000.jpg")
+    load_background_path = os.path.join(THIS_DIR, "background_frames_0_to_500.jpg")
     
     # Foreground mask loading: Set to path of saved mask video to load from file
     # Set to None to generate masks from scratch (requires background)
-    load_masks_from_video_path = None
+    load_masks_from_video_path = None # os.path.join(THIS_DIR, "output", "video_03_foreground_mask.mp4")
     
     # ---------------------------------
     
@@ -728,12 +728,12 @@ if __name__ == "__main__":
         if fg_masks is None:
             logging.error("Failed to load masks from video. Generating from scratch...")
             logging.info("Calculating foreground masks...")
-            fg_masks = d.median_subtract_normalized(threshold_value=16).morphology.fill_holes()
+            fg_masks = d.median_subtract(threshold_value=25).morphology.fill_holes()
     else:
         if load_masks_from_video_path is not None:
             logging.warning(f"Mask video not found: {load_masks_from_video_path}")
         logging.info("Generating foreground masks from scratch...")
-        fg_masks = d.median_subtract_normalized(threshold_value=16).morphology.fill_holes()
+        fg_masks = d.median_subtract(threshold_value=25).morphology.fill_holes()
     
     # --- Initialize plate detector ---
     plate_detector = None

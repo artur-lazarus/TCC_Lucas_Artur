@@ -295,6 +295,31 @@ class Detection:
         masks = hsv_proc.create_hsv_range_mask(self.frames, hue_range, sat_range, val_range)
         return MaskResult(masks, self.frames)
 
+    def yolo_subtract(self, conf_threshold=0.5, iou_threshold=0.7):
+        """
+        "Goes Nuts" background subtraction using YOLOv8 segmentation.
+        
+        Detects and segments vehicles (cars, motorcycles, buses, trucks) using YOLOv8,
+        creating foreground masks based on the segmentation results.
+        
+        Args:
+            model_path: path to YOLOv8 segmentation model (.pt file).
+            conf_threshold: confidence threshold for detections (0-1).
+            iou_threshold: IoU threshold for NMS (0-1).
+        
+        Returns:
+            MaskResult containing the foreground masks.
+        """
+        if not self._color_mode:
+            print("ERROR: YOLO segmentation requires color mode. Reinitialize Detection with color=True.")
+            return None
+        masks = fg_det.detect_foreground_yolo_segmentation(
+            self.frames,
+            conf_threshold=conf_threshold,
+            iou_threshold=iou_threshold
+        )
+        return MaskResult(masks, self.frames)
+
     @property
     def color_mode(self):
         """Return True if frames are kept in color, False if grayscale."""
