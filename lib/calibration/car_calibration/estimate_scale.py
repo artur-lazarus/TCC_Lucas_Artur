@@ -2,11 +2,24 @@ import cv2
 import numpy as np
 import os
 import sys
+from scipy.stats import gaussian_kde
+import matplotlib.pyplot as plt
 
 # Add detection library to path
 DETECTION_LIB_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "detection")
 sys.path.insert(0, DETECTION_LIB_PATH)
 from detection_api import Detection
+
+# Add calibration library to path for homography functions
+CALIBRATION_LIB_PATH = os.path.join(os.path.dirname(__file__), "..")
+sys.path.insert(0, CALIBRATION_LIB_PATH)
+from homography import (
+    f_from_two_orthogonal_vps,
+    get_rotation_matrix_from_vps,
+    build_img_to_bird_homography,
+    pixel_vp_to_cam_dir
+)
+
 
 # -------------------------------------------------------------------
 # PATH CONFIGURATION
@@ -21,11 +34,10 @@ PROJECT_ROOT = os.path.join(THIS_DIR, "..", "..", "..")
 # Load vanishing points from the computed .npy files
 VP_U_PATH = os.path.join(THIS_DIR, "vp_u.npy")
 VP_V_PATH = os.path.join(THIS_DIR, "vp_v.npy")
-VP_W_PATH = os.path.join(THIS_DIR, "vp_w.npy")
 
 VP1_2D = None  # VP in direction of traffic (vp_u - road direction)
 VP2_2D = None  # VP perpendicular to traffic (vp_v - perpendicular to road)
-VP3_2D = None  # VP vertical to road plane (vp_w - vertical)
+VP3_2D = None  # VP vertical to road plane (vp_w - vertical) - COMPUTED from VP1 and VP2
 
 try:
     vp_u = np.load(VP_U_PATH)
@@ -45,28 +57,517 @@ except FileNotFoundError:
 except Exception as e:
     print(f"[ERROR] Failed to load VP2: {e}")
 
-try:
-    vp_w = np.load(VP_W_PATH)
-    VP3_2D = tuple(vp_w)
-    print(f"[INFO] Loaded VP3 (vertical) from {VP_W_PATH}: {VP3_2D}")
-except FileNotFoundError:
-    print(f"[ERROR] Could not find {VP_W_PATH}. Please run compute_vp_w_from_homography.py first.")
-except Exception as e:
-    print(f"[ERROR] Failed to load VP3: {e}")
-
-# Check if all VPs were loaded successfully
-if VP1_2D is None or VP2_2D is None or VP3_2D is None:
-    print(f"{'='*60}\n[FATAL ERROR] One or more Vanishing Points could not be loaded.\n"
-          f"Please ensure all VP files exist:\n"
+# Check if required VPs (VP1 and VP2) were loaded successfully
+if VP1_2D is None or VP2_2D is None:
+    print(f"{'='*60}\n[FATAL ERROR] Required Vanishing Points (VP1, VP2) could not be loaded.\n"
+          f"Please ensure VP files exist:\n"
           f"  - {VP_U_PATH}\n"
           f"  - {VP_V_PATH}\n"
-          f"  - {VP_W_PATH}\n"
           f"{'='*60}")
 else:
-    print(f"[SUCCESS] All VPs loaded successfully:")
+    print(f"[SUCCESS] Required VPs loaded successfully:")
     print(f"  VP1 (road direction): {VP1_2D}")
     print(f"  VP2 (perpendicular): {VP2_2D}")
-    print(f"  VP3 (vertical): {VP3_2D}")
+    print(f"  VP3 will be computed from VP1 and VP2 using homography")
+
+# -------------------------------------------------------------------
+# CAMERA INTRINSICS AND HOMOGRAPHY SETUP
+# -------------------------------------------------------------------
+
+K_MATRIX = None
+H_IMG_TO_GROUND = None
+GROUND_PLANE_SIZE = None
+
+def compute_vp3_from_vp1_vp2(vp1_px, vp2_px, K):
+    """
+    Compute the third vanishing point (vertical) from two ground plane VPs.
+    
+    Since VP1 and VP2 are perpendicular and lie on the ground plane,
+    their cross product gives the vertical direction (VP3).
+    
+    Args:
+        vp1_px: (x, y) pixel coordinates of VP1 (road direction)
+        vp2_px: (x, y) pixel coordinates of VP2 (perpendicular to road)
+        K: 3x3 camera intrinsics matrix
+        
+    Returns:
+        (x, y) pixel coordinates of VP3 (vertical direction)
+    """
+    # Convert pixel VPs to camera directions
+    d1 = pixel_vp_to_cam_dir(vp1_px, K)
+    d2 = pixel_vp_to_cam_dir(vp2_px, K)
+    
+    # VP3 direction is perpendicular to both VP1 and VP2 (cross product)
+    d3 = np.cross(d1, d2)
+    d3 /= np.linalg.norm(d3)
+    
+    # Project back to image coordinates: vp = K @ d
+    vp3_h = K @ d3
+    vp3_px = (vp3_h[0] / vp3_h[2], vp3_h[1] / vp3_h[2])
+    
+    return vp3_px
+
+
+def initialize_camera_and_homography(img_shape, principal_point=None):
+    """
+    Initialize camera intrinsics and ground plane homography from vanishing points.
+    
+    Uses ONLY VP1 (road direction) and VP2 (perpendicular) to compute everything.
+    VP3 (vertical) is derived mathematically from VP1 and VP2.
+    
+    Args:
+        img_shape: (height, width) of the image
+        principal_point: (cx, cy) principal point, defaults to image center
+        
+    Returns:
+        Tuple of (K, H_img_to_ground, output_size, vp3_computed)
+    """
+    global K_MATRIX, H_IMG_TO_GROUND, GROUND_PLANE_SIZE, VP3_2D
+    
+    if VP1_2D is None or VP2_2D is None:
+        raise ValueError("VP1 and VP2 must be loaded!")
+    
+    H_img, W_img = img_shape[:2]
+    
+    # Use image center as principal point if not provided
+    if principal_point is None:
+        cx, cy = W_img / 2.0, H_img / 2.0
+    else:
+        cx, cy = principal_point
+    
+    try:
+        # Compute focal length from orthogonal VPs (VP1 and VP2 are perpendicular)
+        f = f_from_two_orthogonal_vps(VP1_2D, VP2_2D, cx, cy)
+        print(f"[INFO] Computed focal length from VP1 and VP2: {f:.2f} pixels")
+        
+        # Build camera intrinsics matrix
+        K = np.array([
+            [f,   0.0, cx],
+            [0.0, f,   cy],
+            [0.0, 0.0, 1.0]
+        ], dtype=np.float64)
+        
+        # Compute VP3 (vertical) from VP1 and VP2 using homography
+        vp3_computed = compute_vp3_from_vp1_vp2(VP1_2D, VP2_2D, K)
+        print(f"[INFO] Computed VP3 (vertical) from VP1 and VP2: {vp3_computed}")
+        
+        # Update global VP3
+        VP3_2D = vp3_computed
+        
+        # Get rotation matrix from vanishing points
+        # Note: get_rotation_matrix_from_vps expects (vertical_vp, road_vp)
+        # So we pass VP3 (computed vertical) and VP1 (road direction)
+        r1, r2, r3 = get_rotation_matrix_from_vps(vp3_computed, VP1_2D, K)
+        
+        # Build homography to ground plane (bird's eye view)
+        # This maps image pixels to metric coordinates on the ground plane
+        H_img_to_ground, (W_out, H_out) = build_img_to_bird_homography(
+            img_shape, K, r1, r2, scale=None, margin=0.02, roi_polygon=None, target_width_px=1280.0
+        )
+        
+        print(f"[INFO] Ground plane output size: {W_out}x{H_out}")
+        print(f"[INFO] Homography matrix initialized successfully")
+        
+        K_MATRIX = K
+        H_IMG_TO_GROUND = H_img_to_ground
+        GROUND_PLANE_SIZE = (W_out, H_out)
+        
+        return K, H_img_to_ground, (W_out, H_out), vp3_computed
+        
+    except Exception as e:
+        print(f"[ERROR] Failed to initialize camera and homography: {e}")
+        return None, None, None, None
+
+# -------------------------------------------------------------------
+# 3D MEASUREMENT FUNCTIONS
+# -------------------------------------------------------------------
+
+def pixel_to_ground_plane(pixel_points, H_img_to_ground):
+    """
+    Transform 2D pixel coordinates to 3D ground plane coordinates (pseudo-units).
+    
+    Args:
+        pixel_points: numpy array of shape (N, 2) with (x, y) pixel coordinates
+        H_img_to_ground: 3x3 homography matrix from image to ground plane
+        
+    Returns:
+        numpy array of shape (N, 2) with (X, Y) ground plane coordinates in pseudo-units
+        Returns None for points that don't project validly
+    """
+    if H_img_to_ground is None:
+        raise ValueError("Homography not initialized! Call initialize_camera_and_homography first.")
+    
+    # Convert to homogeneous coordinates
+    pixel_points = np.asarray(pixel_points, dtype=np.float64)
+    if pixel_points.ndim == 1:
+        pixel_points = pixel_points.reshape(1, -1)
+    
+    N = pixel_points.shape[0]
+    ones = np.ones((N, 1), dtype=np.float64)
+    pixel_h = np.hstack([pixel_points, ones]).T  # 3xN
+    
+    # Apply homography
+    ground_h = H_img_to_ground @ pixel_h  # 3xN
+    
+    # Normalize by homogeneous coordinate
+    ground_coords = np.zeros((N, 2), dtype=np.float64)
+    for i in range(N):
+        w = ground_h[2, i]
+        if abs(w) > 1e-6:
+            ground_coords[i, 0] = ground_h[0, i] / w
+            ground_coords[i, 1] = ground_h[1, i] / w
+        else:
+            ground_coords[i] = np.nan
+    
+    return ground_coords
+
+
+def measure_distance_3d(point_A, point_B, H_img_to_ground):
+    """
+    Measure Euclidean distance between two points in 3D pseudo-units.
+    
+    Args:
+        point_A: (x, y) pixel coordinates of point A
+        point_B: (x, y) pixel coordinates of point B
+        H_img_to_ground: 3x3 homography matrix from image to ground plane
+        
+    Returns:
+        Distance in pseudo-units, or None if transformation fails
+    """
+    try:
+        # Transform both points to ground plane
+        points_2d = np.array([point_A, point_B], dtype=np.float64)
+        points_3d = pixel_to_ground_plane(points_2d, H_img_to_ground)
+        
+        # Check for invalid projections
+        if np.any(np.isnan(points_3d)):
+            return None
+        
+        # Calculate Euclidean distance
+        distance = np.linalg.norm(points_3d[1] - points_3d[0])
+        return distance
+        
+    except Exception as e:
+        print(f"[Warning] Failed to measure distance: {e}")
+        return None
+
+
+def measure_box_dimensions(corners, H_img_to_ground):
+    """
+    Measure key dimensions of the 3D bounding box in pseudo-units.
+    
+    GEOMETRICALLY CORRECT METHOD (Average of Edges):
+    1. Project all corners to 3D ground plane
+    2. Measure true 3D edge distances
+    3. Average parallel edges in 3D
+    
+    This avoids perspective distortion from computing 2D midpoints first.
+    
+    - Width: Average of AB (front) and CH (back) measured in 3D
+    - Length: Average of AC (left) and BH (right) measured in 3D
+    
+    Args:
+        corners: Dictionary with corner points {'A': (x,y), 'B': (x,y), ...}
+        H_img_to_ground: 3x3 homography matrix from image to ground plane
+        
+    Returns:
+        Dictionary with measurements: {'width': distance, 'length': distance}
+    """
+    measurements = {}
+    
+    if corners is None or H_img_to_ground is None:
+        return measurements
+    
+    # Width: Average of AB (front) and CH (back) edges
+    if all(k in corners for k in ['A', 'B', 'C', 'H']):
+        # Measure front width AB in 3D
+        width_front = measure_distance_3d(corners['A'], corners['B'], H_img_to_ground)
+        # Measure back width CH in 3D
+        width_back = measure_distance_3d(corners['C'], corners['H'], H_img_to_ground)
+        
+        if width_front is not None and width_back is not None:
+            # Average the two 3D measurements
+            width = (width_front + width_back) / 2.0
+            measurements['width'] = width
+    
+    # Length: Average of AC (left) and BH (right) edges
+    if all(k in corners for k in ['A', 'C', 'B', 'H']):
+        # Measure left length AC in 3D
+        length_left = measure_distance_3d(corners['A'], corners['C'], H_img_to_ground)
+        # Measure right length BH in 3D
+        length_right = measure_distance_3d(corners['B'], corners['H'], H_img_to_ground)
+        
+        if length_left is not None and length_right is not None:
+            # Average the two 3D measurements
+            length = (length_left + length_right) / 2.0
+            measurements['length'] = length
+    
+    return measurements
+
+
+def find_kde_mode(data, grid_steps=1000):
+    """
+    Finds the mode (peak) of a 1D data distribution using
+    Kernel Density Estimation (KDE).
+    
+    This is a robust replacement for np.median() to find the
+    most common measurement, as shown in Dubská et al. 2014 [cite: 816-818]
+    and Sochor et al. 2017 [cite: 258].
+    
+    Args:
+        data: A 1D numpy array or list of measurements
+        grid_steps: The resolution of the grid for finding the peak (default: 1000)
+        
+    Returns:
+        The value corresponding to the peak of the KDE, or None if fails
+    """
+    if len(data) == 0:
+        return None
+    
+    data = np.asarray(data)
+    
+    if data.size == 0:
+        return None
+    
+    # 1. Filter extreme outliers (keep central 90%)
+    q05 = np.percentile(data, 5)
+    q95 = np.percentile(data, 95)
+    filtered_data = data[(data >= q05) & (data <= q95)]
+    
+    if filtered_data.size == 0:
+        # Fallback if filtering removes everything
+        filtered_data = data
+    
+    if filtered_data.size == 1:
+        # Single value, return it directly
+        return float(filtered_data[0])
+    
+    # 2. Fit the KDE model
+    try:
+        kde = gaussian_kde(filtered_data)
+    except (np.linalg.LinAlgError, ValueError):
+        # Fallback to median if KDE fails (e.g., all identical values)
+        return float(np.median(filtered_data))
+    
+    # 3. Discretize the space to find the peak [cite: 258]
+    grid_min = np.min(filtered_data)
+    grid_max = np.max(filtered_data)
+    
+    if grid_min == grid_max:
+        # All values are the same
+        return float(grid_min)
+    
+    data_grid = np.linspace(grid_min, grid_max, grid_steps)
+    
+    # 4. Find the Arg Max (The Peak)
+    pdf_values = kde.evaluate(data_grid)
+    peak_index = np.argmax(pdf_values)
+    
+    # 5. Return the Mode
+    robust_mode = data_grid[peak_index]
+    
+    return float(robust_mode)
+
+
+def compute_scale_from_measurements(all_measurements, real_car_width=1.81, real_car_length=4.49, output_dir=None):
+    """
+    Compute scene scale (λ) by statistically merging car measurements.
+    
+    Uses KDE-based mode finding (Dubská et al. 2014 [cite: 816-818]) for robust estimation.
+    Combines two independent measurements:
+    1. Car width (from 3D bbox)
+    2. Car length (from 3D bbox)
+    
+    Args:
+        all_measurements: List of car measurement dicts
+        real_car_width: Real-world car width in meters (default: 1.81m)
+        real_car_length: Real-world car length in meters (default: 4.49m)
+        output_dir: Directory to save histogram visualizations
+        
+    Returns:
+        Tuple of (lambda_final, stats_dict)
+    """
+    # Collect car measurements
+    car_widths = []
+    car_lengths = []
+    
+    for meas in all_measurements:
+        if 'width' in meas:
+            car_widths.append(meas['width'])
+        if 'length' in meas:
+            car_lengths.append(meas['length'])
+    
+    print(f"\n{'='*60}\n[SCALE CALCULATION]\n{'='*60}")
+    print(f"Car measurements: {len(all_measurements)} vehicles")
+    print(f"  Car width samples: {len(car_widths)}")
+    print(f"  Car length samples: {len(car_lengths)}")
+    
+    if len(car_widths) == 0 and len(car_lengths) == 0:
+        print("[ERROR] No valid measurements!")
+        return None, {}
+    
+    stats = {
+        'num_vehicles': len(all_measurements),
+        'num_car_width_samples': len(car_widths),
+        'num_car_length_samples': len(car_lengths),
+        'real_car_width': real_car_width,
+        'real_car_length': real_car_length
+    }
+    
+    scales = []
+    
+    # Create figure for histograms
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    
+    # Scale from car width
+    mode_car_width = None
+    if len(car_widths) > 0:
+        mode_car_width = find_kde_mode(np.array(car_widths))
+        if mode_car_width is not None:
+            lambda_car_width = real_car_width / mode_car_width
+            scales.append(lambda_car_width)
+            stats['mode_car_width_pseudo'] = mode_car_width
+            stats['lambda_car_width'] = lambda_car_width
+            print(f"\nCar Width: mode={mode_car_width:.2f} units → λ={lambda_car_width:.6f} m/unit")
+            
+            # Plot histogram with KDE for width
+            ax = axes[0]
+            car_widths_array = np.array(car_widths)
+            ax.hist(car_widths_array, bins=20, density=True, alpha=0.6, color='blue', edgecolor='black')
+            
+            # Plot KDE curve
+            kde = gaussian_kde(car_widths_array)
+            x_range = np.linspace(car_widths_array.min(), car_widths_array.max(), 200)
+            kde_values = kde.evaluate(x_range)
+            ax.plot(x_range, kde_values, 'r-', linewidth=2, label='KDE')
+            
+            # Mark the mode
+            ax.axvline(mode_car_width, color='green', linestyle='--', linewidth=2, label=f'Mode: {mode_car_width:.2f}')
+            
+            ax.set_xlabel('Car Width (pseudo-units)', fontsize=11)
+            ax.set_ylabel('Density', fontsize=11)
+            ax.set_title(f'Car Width Distribution\n{len(car_widths)} samples, mode={mode_car_width:.2f} units', fontsize=12)
+            ax.legend()
+            ax.grid(True, alpha=0.3)
+    
+    # Scale from car length
+    mode_car_length = None
+    if len(car_lengths) > 0:
+        mode_car_length = find_kde_mode(np.array(car_lengths))
+        if mode_car_length is not None:
+            lambda_car_length = real_car_length / mode_car_length
+            scales.append(lambda_car_length)
+            stats['mode_car_length_pseudo'] = mode_car_length
+            stats['lambda_car_length'] = lambda_car_length
+            print(f"Car Length: mode={mode_car_length:.2f} units → λ={lambda_car_length:.6f} m/unit")
+            
+            # Plot histogram with KDE for length
+            ax = axes[1]
+            car_lengths_array = np.array(car_lengths)
+            ax.hist(car_lengths_array, bins=20, density=True, alpha=0.6, color='orange', edgecolor='black')
+            
+            # Plot KDE curve
+            kde = gaussian_kde(car_lengths_array)
+            x_range = np.linspace(car_lengths_array.min(), car_lengths_array.max(), 200)
+            kde_values = kde.evaluate(x_range)
+            ax.plot(x_range, kde_values, 'r-', linewidth=2, label='KDE')
+            
+            # Mark the mode
+            ax.axvline(mode_car_length, color='green', linestyle='--', linewidth=2, label=f'Mode: {mode_car_length:.2f}')
+            
+            ax.set_xlabel('Car Length (pseudo-units)', fontsize=11)
+            ax.set_ylabel('Density', fontsize=11)
+            ax.set_title(f'Car Length Distribution\n{len(car_lengths)} samples, mode={mode_car_length:.2f} units', fontsize=12)
+            ax.legend()
+            ax.grid(True, alpha=0.3)
+    
+    # Save and display histogram
+    plt.tight_layout()
+    if output_dir:
+        histogram_path = os.path.join(output_dir, "measurement_histograms.png")
+        plt.savefig(histogram_path, dpi=150, bbox_inches='tight')
+        print(f"\n[INFO] Histograms saved to: {histogram_path}")
+    
+    plt.show(block=False)
+    plt.pause(0.1)  # Brief pause to render
+    
+    if len(scales) > 0:
+        # Calculate weighted average based on measurement confidence (inverse variance)
+        # Lower variance = higher confidence = higher weight
+        weights = []
+        scale_values = []
+        
+        if 'lambda_car_width' in stats and len(car_widths) > 1:
+            # Weight by inverse of variance on FILTERED data (same as used for KDE)
+            car_widths_array = np.array(car_widths)
+            q05 = np.percentile(car_widths_array, 5)
+            q95 = np.percentile(car_widths_array, 95)
+            filtered_widths = car_widths_array[(car_widths_array >= q05) & (car_widths_array <= q95)]
+            
+            variance = np.var(filtered_widths) if len(filtered_widths) > 1 else np.var(car_widths_array)
+            weight = 1.0 / (variance + 1e-6) if variance > 0 else 1.0
+            weights.append(weight)
+            scale_values.append(stats['lambda_car_width'])
+            stats['width_variance'] = variance
+            stats['width_weight'] = weight
+        
+        if 'lambda_car_length' in stats and len(car_lengths) > 1:
+            # Weight by inverse of variance on FILTERED data (same as used for KDE)
+            car_lengths_array = np.array(car_lengths)
+            q05 = np.percentile(car_lengths_array, 5)
+            q95 = np.percentile(car_lengths_array, 95)
+            filtered_lengths = car_lengths_array[(car_lengths_array >= q05) & (car_lengths_array <= q95)]
+            
+            variance = np.var(filtered_lengths) if len(filtered_lengths) > 1 else np.var(car_lengths_array)
+            weight = 1.0 / (variance + 1e-6) if variance > 0 else 1.0
+            weights.append(weight)
+            scale_values.append(stats['lambda_car_length'])
+            stats['length_variance'] = variance
+            stats['length_weight'] = weight
+        
+        # Compute weighted average
+        if len(weights) > 0 and sum(weights) > 0:
+            lambda_weighted = np.average(scale_values, weights=weights)
+            # Normalize weights for display
+            total_weight = sum(weights)
+            normalized_weights = [w/total_weight for w in weights]
+        else:
+            lambda_weighted = np.mean(scales)
+            normalized_weights = [1.0/len(scales)] * len(scales)
+        
+        lambda_min = np.min(scales)
+        lambda_avg = np.mean(scales)
+        
+        stats['lambda_minimum'] = lambda_min
+        stats['lambda_average'] = lambda_avg
+        stats['lambda_weighted'] = lambda_weighted
+        stats['lambda_final'] = lambda_weighted  # Use weighted as final
+        stats['num_scales'] = len(scales)
+        
+        print(f"\n{'='*60}")
+        print(f"SCALE SUMMARY ({len(scales)} sources):")
+        print(f"  Minimum (conservative): λ = {lambda_min:.6f} m/unit")
+        print(f"  Average (equal weight): λ = {lambda_avg:.6f} m/unit")
+        print(f"  Weighted (by confidence): λ = {lambda_weighted:.6f} m/unit")
+        print(f"{'='*60}")
+        print(f"FINAL SCALE (weighted): λ = {lambda_weighted:.6f} m/unit")
+        print(f"{'='*60}")
+        
+        # Display weighting details
+        weight_info = []
+        if 'width_weight' in stats:
+            weight_info.append(f"Width: {normalized_weights[0]:.1%} (var={stats.get('width_variance', 0):.2f})")
+        if 'length_weight' in stats:
+            idx = 1 if 'width_weight' in stats else 0
+            weight_info.append(f"Length: {normalized_weights[idx]:.1%} (var={stats.get('length_variance', 0):.2f})")
+        print(f"Confidence weights: {', '.join(weight_info)}")
+        print(f"Note: Lower variance = higher confidence = more weight")
+        print(f"{'='*60}\n")
+        
+        return lambda_weighted, stats
+    
+    return None, stats
+
 
 # -------------------------------------------------------------------
 # GEOMETRY HELPER FUNCTIONS
@@ -233,53 +734,27 @@ def get_projected_corners(hull, vp1, vp2, vp3):
         # G: intersection of red and green furthest from VP3 (reuse a_candidates)
         corners['G'] = a_candidates[np.argmax(a_distances)]
         
-        # Create solid auxiliary lines: VP3-A, VP2-F, VP1-D
+        # Create all auxiliary lines for calculation and visualization
         line_vp3_A = (vp3, corners['A'])
         line_vp2_F = (vp2, corners['F'])
         line_vp1_D = (vp1, corners['D'])
-        
-        # Create dashed auxiliary lines: VP1-B, VP2-C, VP3-G
-        line_vp1_B = (vp1, corners['B'])
-        line_vp2_C = (vp2, corners['C'])
         line_vp3_G = (vp3, corners['G'])
+        line_vp2_C = (vp2, corners['C'])
+        line_vp1_B = (vp1, corners['B'])
         
-        # Calculate auxiliary line intersections (I, J, K) from solid lines
-        # I: VP1-D × VP2-F
-        corners['I'] = line_line_intersection(line_vp1_D, line_vp2_F)
-        # J: VP1-D × VP3-A
-        corners['J'] = line_line_intersection(line_vp1_D, line_vp3_A)
-        # K: VP2-F × VP3-A
-        corners['K'] = line_line_intersection(line_vp2_F, line_vp3_A)
+        # E: Direct intersection of VP3-A × VP2-F
+        corners['E'] = line_line_intersection(line_vp3_A, line_vp2_F)
         
-        # E: centroid of triangle I-J-K
-        if corners['I'] and corners['J'] and corners['K']:
-            centroid_x = (corners['I'][0] + corners['J'][0] + corners['K'][0]) / 3.0
-            centroid_y = (corners['I'][1] + corners['J'][1] + corners['K'][1]) / 3.0
-            corners['E'] = (int(centroid_x), int(centroid_y))
+        # H: Direct intersection of VP3-G × VP2-C
+        corners['H'] = line_line_intersection(line_vp3_G, line_vp2_C)
         
-        # Calculate auxiliary line intersections (L, M, N) from dashed lines
-        # L: VP1-B × VP2-C
-        corners['L'] = line_line_intersection(line_vp1_B, line_vp2_C)
-        # M: VP1-B × VP3-G
-        corners['M'] = line_line_intersection(line_vp1_B, line_vp3_G)
-        # N: VP2-C × VP3-G
-        corners['N'] = line_line_intersection(line_vp2_C, line_vp3_G)
-        
-        # H: centroid of triangle L-M-N
-        if corners['L'] and corners['M'] and corners['N']:
-            centroid_x = (corners['L'][0] + corners['M'][0] + corners['N'][0]) / 3.0
-            centroid_y = (corners['L'][1] + corners['M'][1] + corners['N'][1]) / 3.0
-            corners['H'] = (int(centroid_x), int(centroid_y))
-        
-        # Add solid lines to tangent_lines for visualization
+        # Add all auxiliary lines to tangent_lines for visualization
         tangent_lines['vp3_A'] = line_vp3_A
         tangent_lines['vp2_F'] = line_vp2_F
         tangent_lines['vp1_D'] = line_vp1_D
-        
-        # Add dashed lines to tangent_lines for visualization
-        tangent_lines['vp1_B_dashed'] = line_vp1_B
-        tangent_lines['vp2_C_dashed'] = line_vp2_C
         tangent_lines['vp3_G_dashed'] = line_vp3_G
+        tangent_lines['vp2_C_dashed'] = line_vp2_C
+        tangent_lines['vp1_B_dashed'] = line_vp1_B
         
         # Check for failures
         if any(v is None for v in corners.values()):
@@ -298,7 +773,7 @@ def get_projected_corners(hull, vp1, vp2, vp3):
 
 def process_frame_with_yolo_masks(yolo_masks: list, fgmask: np.ndarray, original_frame: np.ndarray, verbose: bool = True, 
                                    save_debug_crops: bool = False, output_dir: str = None, 
-                                   frame_number: int = 0) -> tuple:
+                                   frame_number: int = 0, roi_mask: np.ndarray = None) -> tuple:
     """
     Helper function to process YOLO segmentation masks and run 2D Bounding Box construction.
     
@@ -351,6 +826,38 @@ def process_frame_with_yolo_masks(yolo_masks: list, fgmask: np.ndarray, original
             x2, y2 = x1 + w, y1 + h
             box = np.array([x1, y1, x2, y2])
             
+            # Filter out vehicles cropped by ROI mask
+            if roi_mask is not None:
+                # Check if vehicle bbox touches ROI mask boundary
+                # Expand bbox slightly and check if it contains any zero pixels (outside ROI)
+                margin = 5
+                x1_check = max(0, x1 - margin)
+                y1_check = max(0, y1 - margin)
+                x2_check = min(roi_mask.shape[1], x2 + margin)
+                y2_check = min(roi_mask.shape[0], y2 + margin)
+                
+                # Create a thin border around bbox to check
+                border_mask = np.zeros_like(roi_mask)
+                border_mask[y1_check:y2_check, x1_check:x2_check] = 255
+                inner_mask = np.zeros_like(roi_mask)
+                inner_y1 = min(y1 + margin, y2_check)
+                inner_x1 = min(x1 + margin, x2_check)
+                inner_y2 = max(y2 - margin, y1_check)
+                inner_x2 = max(x2 - margin, x1_check)
+                if inner_y2 > inner_y1 and inner_x2 > inner_x1:
+                    inner_mask[inner_y1:inner_y2, inner_x1:inner_x2] = 255
+                border_mask = cv2.subtract(border_mask, inner_mask)
+                
+                # Check if border intersects with ROI edge (has zero pixels)
+                border_check = cv2.bitwise_and(roi_mask, border_mask)
+                border_pixels = np.count_nonzero(border_mask)
+                valid_pixels = np.count_nonzero(border_check)
+                
+                if border_pixels > 0 and valid_pixels < border_pixels * 0.9:
+                    if verbose:
+                        print(f"[Skipped] Vehicle cropped by ROI mask: [{x1}, {y1}, {x2}, {y2}] - {valid_pixels}/{border_pixels} border pixels in ROI")
+                    continue
+            
             # Use contour as polygon
             polygon = contour.reshape(-1, 2)
             
@@ -371,8 +878,20 @@ def process_frame_with_yolo_masks(yolo_masks: list, fgmask: np.ndarray, original
             # Get 2D Projected Corners
             corners, tangent_lines = get_projected_corners(hull_points_list, VP1_2D, VP2_2D, VP3_2D)
             
-            # Store all data
-            detection_data.append((box, polygon, conf, hull_for_drawing, corners))
+            # Measure 3D distances if homography is initialized
+            measurements = {}
+            plate_widths = []
+            
+            if corners and H_IMG_TO_GROUND is not None:
+                measurements = measure_box_dimensions(corners, H_IMG_TO_GROUND)
+                
+                if verbose and measurements:
+                    print(f"  3D Measurements (pseudo-units):")
+                    for key, value in measurements.items():
+                        print(f"    Distance {key}: {value:.2f} units")
+            
+            # Store all data including measurements
+            detection_data.append((box, polygon, conf, hull_for_drawing, corners, measurements))
             
             # Draw convex hull on the display
             cv2.drawContours(display_frame, [hull_for_drawing], -1, (255, 255, 0), 2)
@@ -480,12 +999,22 @@ def process_frame_with_yolo_masks(yolo_masks: list, fgmask: np.ndarray, original
                         cv2.circle(wireframe_display, point, 6, (0, 255, 255), -1)
                         cv2.putText(wireframe_display, point_name, (point[0] + 8, point[1] + 8),
                                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+                
+                # Display measurements on wireframe
+                if measurements:
+                    y_offset = 60
+                    for key, value in measurements.items():
+                        text = f"{key}: {value:.2f} units"
+                        cv2.putText(wireframe_display, text, (10, y_offset),
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                        y_offset += 30
             
     return display_frame, wireframe_display, detection_data
 
 
 def process_frame(frame: np.ndarray, detector_model=None, verbose: bool = True, save_debug_crops: bool = False, 
-                  output_dir: str = None, frame_number: int = 0, confidence_threshold: float = 0.5) -> tuple:
+                  output_dir: str = None, frame_number: int = 0, confidence_threshold: float = 0.5,
+                  roi_mask: np.ndarray = None) -> tuple:
     """
     Helper function to process a single frame with vehicle segmentation
     AND run the 2D Bounding Box construction.
@@ -500,6 +1029,7 @@ def process_frame(frame: np.ndarray, detector_model=None, verbose: bool = True, 
         output_dir: Directory to save debug crops
         frame_number: Frame number for naming
         confidence_threshold: Unused (kept for API compatibility)
+        roi_mask: ROI mask for filtering cropped vehicles
         
     Returns:
         Tuple of (geometry_display, wireframe_display, detection_data)
@@ -509,7 +1039,7 @@ def process_frame(frame: np.ndarray, detector_model=None, verbose: bool = True, 
     """
     # Run YOLOv8 segmentation using Detection API's "goes nuts" method
     d = Detection([frame], max_frames=1, color=True)
-    mask_result = d.yolo_subtract(conf_threshold=0.8)
+    mask_result = d.yolo_subtract(conf_threshold=0.7)
     
     if mask_result is None or len(mask_result.masks) == 0:
         # Return empty displays
@@ -524,9 +1054,9 @@ def process_frame(frame: np.ndarray, detector_model=None, verbose: bool = True, 
     # Convert to BGR for visualization
     fgmask_bgr = cv2.cvtColor(fgmask, cv2.COLOR_GRAY2BGR)
     
-    # Process with both foreground mask and original frame
+    # Process with both foreground mask and original frame, passing roi_mask through
     return process_frame_with_yolo_masks(mask_result.masks, fgmask_bgr, frame, verbose, save_debug_crops, 
-                                         output_dir, frame_number)
+                                         output_dir, frame_number, roi_mask=roi_mask)
 
 
 def run_detection_pipeline(image_path: str, output_path: str):
@@ -592,6 +1122,20 @@ def process_video(video_path: str, output_path: str, target_fps: int = 10, displ
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     
+    # Initialize camera intrinsics and homography for 3D measurements
+    print("\n[INFO] Initializing camera calibration and homography...")
+    print("[INFO] Using VP1 (road) and VP2 (perpendicular) - VP3 (vertical) will be computed")
+    try:
+        K, H, size, vp3_computed = initialize_camera_and_homography((height, width))
+        if K is not None:
+            print("[SUCCESS] Camera calibration initialized successfully")
+            print(f"[INFO] VP3 computed as: {vp3_computed}")
+        else:
+            print("[WARNING] Failed to initialize camera calibration - 3D measurements will be unavailable")
+    except Exception as e:
+        print(f"[WARNING] Could not initialize camera calibration: {e}")
+        print("[WARNING] 3D measurements will be unavailable")
+    
     # Resize mask to match video dimensions
     if roi_mask is not None:
         if roi_mask.shape[0] != height or roi_mask.shape[1] != width:
@@ -635,7 +1179,8 @@ def process_video(video_path: str, output_path: str, target_fps: int = 10, displ
         print(f"\nRunning YOLO segmentation...")
         geometry_display, wireframe_display, detection_data = process_frame(
             masked_frame, verbose=True,
-            save_debug_crops=True, output_dir=output_dir, frame_number=single_frame
+            save_debug_crops=True, output_dir=output_dir, frame_number=single_frame,
+            roi_mask=roi_mask
         )
         
         detection_count = len(detection_data)
@@ -668,6 +1213,9 @@ def process_video(video_path: str, output_path: str, target_fps: int = 10, displ
     total_detections = 0
     paused = False
     
+    # Accumulate all measurements for scale calculation
+    all_measurements = []
+    
     try:
         while True:
             ret, frame = cap.read()
@@ -692,10 +1240,18 @@ def process_video(video_path: str, output_path: str, target_fps: int = 10, displ
             
             geometry_display, wireframe_display, detection_data = process_frame(
                 masked_frame, verbose=False,
-                save_debug_crops=True, output_dir=output_dir, frame_number=frame_count
+                save_debug_crops=True, output_dir=output_dir, frame_number=frame_count,
+                roi_mask=roi_mask
             )
             detection_count = len(detection_data)
             total_detections += detection_count
+            
+            # Collect measurements from this frame
+            for detection in detection_data:
+                if len(detection) >= 6:  # Has measurements
+                    box, polygon, conf, hull, corners, measurements = detection
+                    if measurements:
+                        all_measurements.append(measurements)
             
             info_text = f"Frame: {frame_count}/{total_frames} | Detections: {detection_count}"
             cv2.putText(geometry_display, info_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
@@ -737,6 +1293,38 @@ def process_video(video_path: str, output_path: str, target_fps: int = 10, displ
         print(f"Geometry video saved to: {output_path}")
         print(f"Wireframe video saved to: {wireframe_path}")
         print(f"{'='*60}")
+        
+        # Compute final scene scale from accumulated measurements
+        if len(all_measurements) > 0 and H_IMG_TO_GROUND is not None:
+            lambda_final, scale_stats = compute_scale_from_measurements(
+                all_measurements,
+                real_car_width=1.81,  # Median width from 741 vehicle dataset
+                real_car_length=4.49,  # Median length from 741 vehicle dataset
+                output_dir=output_dir
+            )
+            
+            if lambda_final is not None:
+                # Save scale to file
+                scale_output_path = os.path.join(output_dir, "scene_scale.txt")
+                with open(scale_output_path, 'w') as f:
+                    f.write(f"Scene Scale Factor (λ)\n")
+                    f.write(f"{'='*50}\n\n")
+                    f.write(f"Final Scale: {lambda_final:.6f} meters/pseudo-unit\n")
+                    f.write(f"Average Scale: {scale_stats.get('lambda_average', 0):.6f} meters/pseudo-unit\n\n")
+                    f.write(f"Statistics:\n")
+                    f.write(f"  Total vehicles measured: {scale_stats.get('num_vehicles', 0)}\n")
+                    f.write(f"  Width samples: {scale_stats.get('num_width_samples', 0)}\n")
+                    f.write(f"  Length samples: {scale_stats.get('num_length_samples', 0)}\n\n")
+                    if 'mode_car_width_pseudo' in scale_stats:
+                        f.write(f"  Mode car width (pseudo-units): {scale_stats['mode_car_width_pseudo']:.2f}\n")
+                        f.write(f"  Scale from car width: {scale_stats['lambda_car_width']:.6f} m/unit\n")
+                    if 'mode_car_length_pseudo' in scale_stats:
+                        f.write(f"  Mode car length (pseudo-units): {scale_stats['mode_car_length_pseudo']:.2f}\n")
+                        f.write(f"  Scale from car length: {scale_stats['lambda_car_length']:.6f} m/unit\n")
+                
+                print(f"\n[SUCCESS] Scale factor saved to: {scale_output_path}")
+        else:
+            print("\n[INFO] Scale calculation skipped (no measurements or homography not initialized)")
 
 
 # --- Main execution ---
@@ -744,8 +1332,8 @@ if __name__ == "__main__":
     INPUT_VIDEO = os.path.join(PROJECT_ROOT, "assets", "video.avi")
     OUTPUT_VIDEO = os.path.join(THIS_DIR, "output", "test_traffic_output.mp4")
     MASK_PATH = os.path.join(PROJECT_ROOT, "assets", "video_mask.png")
-    TARGET_FPS = 10
-    MAX_FRAMES = 700
+    TARGET_FPS = 30
+    MAX_FRAMES = 5000
     SINGLE_FRAME = None # 1670
     
     process_video(
