@@ -27,6 +27,26 @@ def calculate_optical_flow_multiple(
 
     return flows
 
+def calculate_optical_flow(first_frame, second_frame, dis_preset="FAST"):
+    """Compute dense optical flow between two frames using OpenCV DISOpticalFlow."""
+    print("Time2: " + str(time.perf_counter()))
+    preset_map = {
+        "ULTRAFAST": cv2.DISOPTICAL_FLOW_PRESET_ULTRAFAST,
+        "FAST": cv2.DISOPTICAL_FLOW_PRESET_FAST,
+        "MEDIUM": cv2.DISOPTICAL_FLOW_PRESET_MEDIUM,
+    }
+    print("Time3: " + str(time.perf_counter()))
+
+    preset_cv = preset_map.get(dis_preset.upper(), cv2.DISOPTICAL_FLOW_PRESET_FAST)
+    print("Time4: " + str(time.perf_counter()))
+    dis = cv2.DISOpticalFlow_create(preset_cv)
+    print("Time5: " + str(time.perf_counter()))
+
+    flow = dis.calc(first_frame, second_frame, None)
+    print("Time6: " + str(time.perf_counter()))
+    print("Time7: " + str(time.perf_counter()))
+    return flow
+
 def flow_to_polar(flow):
     fx, fy = flow[..., 0], flow[..., 1]
     magnitude, angle = cv2.cartToPolar(fx, fy)
@@ -38,6 +58,15 @@ def flow_to_polar_multiple(flows):
         mag, ang = flow_to_polar(flow)
         flows_polar.append((mag, ang))
     return flows_polar
+
+def flow_subtract(flow_polar, direction_range, threshold, save=False):
+        dir_min, dir_max = direction_range
+        if dir_min>dir_max:
+            dir_min, dir_max = dir_max, dir_min
+        dir_mask = cv2.inRange(flow_polar[1], dir_min, dir_max)
+        mag_mask = cv2.inRange(flow_polar[0], threshold, 1e6)
+        combined_mask = cv2.bitwise_and(dir_mask, mag_mask)
+        return combined_mask
 
 
 
@@ -79,3 +108,16 @@ def hue_range_mask(hsv_flows, hue_min, hue_max, value_min=20):
         mask = cv2.bitwise_and(hue_mask, value_mask)
         masks.append(mask)
     return masks
+
+if __name__ == "__main__":
+    import video_stream
+    import time
+
+    test_video = video_stream.VideoStream()
+    test_video.set_config("dataset/session0_left/video.avi", frame_interval=1, colour=False)
+    frames = [test_video.get_frame()[1]]
+    for i in range(10):
+        _, frame = test_video.get_frame()
+        frames.append(frame)
+        print("Time1: " + str(time.perf_counter()))
+        calculate_optical_flow(frames[i], frames[i+1])

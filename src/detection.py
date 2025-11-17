@@ -3,77 +3,6 @@ import numpy as np
 import cv2
 import tracking
 
-
-class Background:
-    def __init__(self, W, H, size):
-        self.W = W
-        self.H = H
-        self.NPX = W * H
-        self.size = size  # sliding window length
-
-        self.hist = np.zeros((self.NPX, 256), dtype=np.uint16)
-        self.ring = np.zeros((self.NPX, self.size), dtype=np.uint8)
-        self.ring_head = 0
-
-        self.last_bg_computed = None
-        self.last_bg_computed_percentile = None
-        self.updated_since_last_median = False
-
-        self.loaded = 0  # how many frames have been ingested
-
-    # ---------------------------------------------------------
-    def update(self, frame):
-        """Add one new frame to the sliding histogram."""
-        f = frame.reshape(-1)
-
-        if self.loaded < self.size:
-            # WARM-UP PHASE: no removals
-            self.hist[np.arange(self.NPX), f] += 1
-            self.ring[:, self.ring_head] = f
-
-            self.ring_head = (self.ring_head + 1) % self.size
-            self.loaded += 1
-            return
-
-        # STEADY STATE: sliding window remove + add
-        old_vals = self.ring[:, self.ring_head]
-
-        self.hist[np.arange(self.NPX), old_vals] -= 1
-        self.hist[np.arange(self.NPX), f]       += 1
-
-        self.ring[:, self.ring_head] = f
-        self.ring_head = (self.ring_head + 1) % self.size
-
-        self.updated_since_last_median = True
-
-    # ---------------------------------------------------------
-    def get_background_percentile(self, percentile):
-        """
-        Returns the background percentile image (e.g., 50 = median).
-        If not enough frames have been loaded, prints a warning and returns None.
-        """
-        if self.loaded < self.size:
-            print(f"[Background] Not enough frames yet ({self.loaded}/{self.size}). Returning None.")
-            return None
-        
-        if (not self.updated_since_last_median) and (self.last_bg_computed_percentile == percentile):
-            return self.last_bg_computed
-
-        # Compute cumulative histogram per pixel
-        c = np.cumsum(self.hist, axis=1)
-
-        # Target count for the percentile
-        target = int((percentile / 100.0) * self.size)
-
-        # argmax finds first bin where cumulative >= target
-        values = np.argmax(c >= target, axis=1)
-
-        self.last_bg_computed = values.reshape(self.H, self.W).astype(np.uint8)
-        self.last_bg_computed_percentile = percentile
-        self.updated_since_last_median = False
-
-        return values.reshape(self.H, self.W).astype(np.uint8)
-
 class Detection:
     def __init__(self):
         self._flows = None
@@ -287,5 +216,13 @@ def _draw_tracks(frame, tracker):
         cv2.putText(frame, speed_text, speed_org, cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
 
         _draw_track_trail(frame, t, max_len=25)
+
+def fill_holes(mask):
+        h, w = mask.shape
+        flood_mask = np.zeros((h + 2, w + 2), np.uint8)
+        im_flood = mask.copy()
+        cv2.floodFill(im_flood, flood_mask, (0, 0), 255)
+        im_flood_inv = cv2.bitwise_not(im_flood)
+        return cv2.bitwise_or(mask, im_flood_inv)
     
     

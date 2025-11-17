@@ -1,0 +1,50 @@
+import cv2
+import background
+
+class VideoStream:
+    def __init__(self):
+        pass
+
+    def set_config(self, video_path, frame_interval=1, colour=True, make_background=False):
+        self.cap = cv2.VideoCapture(video_path)
+        if not self.cap.isOpened():
+            raise ValueError(f"Could not open video: {video_path}")
+        self.frame_interval = frame_interval
+        self.frame_count = 0
+        self.colour = colour
+        self.make_background = make_background
+
+    def start_background(self, window_size, W, H):
+        self._background = background.Background(W, H, size=window_size)
+
+    def get_frame(self):
+        if self.make_background and self._background is None:
+            raise ValueError("Background not initialized. Call start_background() first.")
+        
+        for _ in range(self.frame_interval):
+            ret, frame = self.cap.read()
+            self.frame_count += 1
+            if not ret:
+                return None
+        if not self.colour and frame is not None:
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        if self.make_background and frame is not None:
+            self._background.update(frame)
+        return self.frame_count, frame
+    
+    def set_warping_configs(self, H_matrix, W_out, H_out):
+        self.H_matrix=H_matrix
+        self.warped_H_out = H_out
+        self.warped_W_out = W_out
+
+    def get_frame_warped(self):
+        frame = self.get_frame()
+        warped_frame = cv2.warpPerspective(frame, 
+                                         self.H_matrix, 
+                                         (self.warped_W_out, self.warped_H_out),
+                                         flags=cv2.INTER_LINEAR,
+                                         borderMode=cv2.BORDER_CONSTANT,
+                                         borderValue=0)
+        return warped_frame
+    
+video = VideoStream()
