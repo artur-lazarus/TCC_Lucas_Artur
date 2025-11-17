@@ -1,4 +1,5 @@
 import numpy as np
+import cv2
 
 class Background:
     def __init__(self, W, H, size):
@@ -70,28 +71,28 @@ class Background:
 
         return values.reshape(self.H, self.W).astype(np.uint8)
     
-def background_subtract(frame, background_object, threshold, subtract_percentile = 50, normalize=False, norm_percentiles=(10,90)):
-        if background_object is None or background_object.loaded < background_object.size:
-            print("ERROR: Background not initialized or not enough frames loaded. Call init_background() first.")
-            return None
-        bg_v = background_object.get_background_percentile(subtract_percentile).astype(np.float32)
-        v = frame.astype(np.float32)
-        
-        
-        if normalize:
-            p_low, p_high = norm_percentiles
-            bg_v_low = np.percentile(bg_v, p_low)
-            bg_v_high = np.percentile(bg_v, p_high)
-            v_low = np.percentile(v, p_low)
-            v_high = np.percentile(v, p_high)
-            v_range = max(1.0, v_high - v_low)
-            v_norm = (v - v_low) * (bg_v_high - bg_v_low) / v_range + bg_v_low
-        else:
-            v_norm = v
+    def background_subtract(self, frame, threshold, subtract_percentile = 50, normalize=False, norm_percentiles=(10,90)):
+            if self is None or self.loaded < self.size:
+                print("ERROR: Background not initialized or not enough frames loaded. Call init_background() first.")
+                return None
+            bg_v = self.get_background_percentile(subtract_percentile).astype(np.float32)
+            v = frame.astype(np.float32)
+            
+            
+            if normalize:
+                p_low, p_high = norm_percentiles
+                bg_v_low = np.percentile(bg_v, p_low)
+                bg_v_high = np.percentile(bg_v, p_high)
+                v_low = np.percentile(v, p_low)
+                v_high = np.percentile(v, p_high)
+                v_range = max(1.0, v_high - v_low)
+                v_norm = (v - v_low) * (bg_v_high - bg_v_low) / v_range + bg_v_low
+            else:
+                v_norm = v
 
-        v_norm = np.clip(v_norm, 0, 255).astype(np.uint8)
-        print("AAAAAAAA. bg_v size:", bg_v.shape, " v_norm size:", v_norm.shape)
-        diff = cv2.absdiff(bg_v.astype(np.uint8), v_norm)
-        _, mask = cv2.threshold(diff, threshold, 255, cv2.THRESH_BINARY)
-        mask = cv2.medianBlur(mask, 5)  
-        return mask
+            v_norm = np.clip(v_norm, 0, 255).astype(np.uint8)
+            print("AAAAAAAA. bg_v size:", bg_v.shape, " v_norm size:", v_norm.shape)
+            diff = cv2.absdiff(bg_v.astype(np.uint8), v_norm)
+            _, mask = cv2.threshold(diff, threshold, 255, cv2.THRESH_BINARY)
+            mask = cv2.medianBlur(mask, 5)  
+            return mask
