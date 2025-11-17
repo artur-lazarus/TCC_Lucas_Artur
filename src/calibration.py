@@ -131,9 +131,9 @@ def get_main_movement_range(n_frames, coverage_threshold=None, window_size=None,
         raise ValueError("Exactly one of window_size or coverage_threshold must be provided")
     
     angle_bins = np.zeros(90, dtype=np.float64)
-    prev = video.get_frame()
+    prev = video.get_frame()[1]
     for i in range(n_frames):
-        curr = video.get_frame()
+        curr = video.get_frame()[1]
         flow_polar_magnitude, flow_polar_angle = optical_flow.flow_to_polar(optical_flow.calculate_optical_flow(prev, curr, dis_preset="FAST"))
         mask = flow_polar_magnitude > magnitude_threshold
         angle_bin = ((flow_polar_angle[mask] % np.pi) * 90 / np.pi).astype(np.int32)
@@ -152,7 +152,7 @@ def get_lanes_y_pxs(n_frames, background_warped, min_area_for_car_detection):
     bottom_edges_y = []
     image_height = 0
     for i in range(n_frames):
-        warped_frame = video.get_frame_warped()
+        warped_frame = video.get_frame_warped()[1]
         mask = detection.fill_holes(
                 background.background_subtract(
                     warped_frame, background_warped, 
@@ -245,10 +245,10 @@ def calculate_roi_polygon(n_frames, car_direction_range):
     roi_coverage = 0.97
     roi_polygon_sides = 6
 
-    prev=video.get_frame()
+    prev=video.get_frame()[1]
     meta_background = background.Background(prev.shape[1], prev.shape[0], size=n_frames)
     for i in range(n_frames):
-        curr=video.get_frame()
+        curr=video.get_frame()[1]
         optical_flow_polar = optical_flow.flow_to_polar(optical_flow.calculate_optical_flow(prev, curr, dis_preset="FAST"))
         flow_mask = optical_flow.flow_subtract(optical_flow_polar, car_direction_range, flow_magnitude_threshold)
         bg_mask = background.background_subtract(curr, video._background, threshold=background_subtraction_threshold, subtract_percentile=50)
@@ -288,7 +288,7 @@ def calibrate():
     print(f"ROI polygon calculation time: {timec2 - timec1:.3f} seconds")
 
     # Basic intrinsics estimation
-    frame=video.get_frame()
+    frame=video.get_frame()[1]
     w,h = frame[0].shape[1], frame[0].shape[0]
     cx = w // 2
     cy = h // 2
@@ -314,7 +314,7 @@ def calibrate():
     # Scale calculation
     background_warped = background.Background(W_out, H_out, warped_bg_window_size)
     for _ in range(warped_bg_window_size):
-        frame_warped = video.get_frame_warped()
+        frame_warped = video.get_frame_warped()[1]
         background_warped.update(frame_warped)
 
     lanes_y_pxs = get_lanes_y_pxs(get_lanes_frame_number, background_warped, min_area_for_car_detection)
@@ -353,7 +353,7 @@ def calibrate():
             fout.write(f"  {i}: ({pt[0]}, {pt[1]})\n")
     print("Saved: final_debug/roi_on_mask.png, final_debug/roi_stats.txt")
 
-    warped_example = video.get_frame_warped()
+    warped_example = video.get_frame_warped()[1]
     cv2.imwrite("final_debug/warped_example.png", warped_example)
     print("Saved: final_debug/warped_example.png")
 

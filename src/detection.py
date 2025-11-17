@@ -2,11 +2,11 @@ import optical_flow
 import numpy as np
 import cv2
 import tracking
+from video_stream import video
+import background
 
 class Detection:
     def __init__(self):
-        self._flows = None
-        self._flows_polar = None
         self._background = None
 
     def insert_calibration(self, H_matrix, roi_polygon, H_out, W_out, lanes_y_pxs, fps):
@@ -28,7 +28,7 @@ class Detection:
             min_hits=min_hits
         )
 
-    def process_frame(self, frame, visualize=True):
+    def process_frame(self, visualize=True):
         min_car_area = 1600
 
         if not hasattr(self, 'H_matrix'):
@@ -37,15 +37,10 @@ class Detection:
         if not hasattr(self, 'tracker'):
             print("ERROR: Tracker not initialized. Call start_tracker() first.")
             return None
-        calibrated_frame = cv2.warpPerspective(
-            frame,
-            np.array(self.H_matrix),
-            (self.W_out, self.H_out),
-            flags=cv2.INTER_LINEAR,
-            borderMode=cv2.BORDER_CONSTANT,
-            borderValue=0
-        )
-
+        if not self._background or self._background.loaded < self._background.size:
+            print("ERROR: Background not initialized or not enough frames loaded. Call init_background() first.")
+            return None
+        frame_count, calibrated_frame = video.get_frame_warped()
 
         for lane_y in self.lanes_y_pxs:
             cv2.line(calibrated_frame, (0, lane_y), (self.W_out, lane_y), (0), 1)
@@ -54,7 +49,7 @@ class Detection:
         output_image, bboxes, areas = self.detect_blobs(calibrated_frame_mask, min_area=min_car_area, draw_boxes=True)
         BL_corners = [(bbox[0], bbox[1]+bbox[3]) for bbox in bboxes] # (x, y+h)
 
-        self.tracker.update(BL_corners)
+        self.tracker.update(BL_corners, frame_count)
 
         if visualize:
             frame_vis = cv2.cvtColor(calibrated_frame, cv2.COLOR_GRAY2BGR)
@@ -66,92 +61,6 @@ class Detection:
         else:
             return None
 
-    def init_flows(self, frames, dis_preset="FAST"):
-        # Initialize optical flows for the given frames
-        self._flows = optical_flow.calculate_optical_flow_multiple(frames, dis_preset=dis_preset)
-        self._flows_polar = optical_flow.flow_to_polar_multiple(self._flows)
-
-    def init_background_populated(self, frames):
-        self.init_background(frames[0].shape[1], frames[0].shape[0], window_size=len(frames))
-        for frame in frames:
-            self._background.update(frame)
-    
-    def init_background(self, W, H, window_size):
-        self._background = Background(W, H, size=window_size)
-        
-    def get_background(self, percentile):
-        if self._background is None:
-            print("ERROR: Background not initialized. Call init_background() first.")
-            return None
-        return self._background.get_background_percentile(percentile)
-    
-    def flow_subtract(self, index, direction_range, threshold,save=False):
-        if self._flows is None or self._flows_polar is None:
-            print("ERROR: Flows not initialized. Call init_flows() first.")
-            return None
-        dir_min, dir_max = direction_range
-        if dir_min>dir_max:
-            dir_min, dir_max = dir_max, dir_min
-        dir_mask = cv2.inRange(self._flows_polar[index][1], dir_min, dir_max)
-        mag_mask = cv2.inRange(self._flows_polar[index][0], threshold, 1e6)
-        combined_mask = cv2.bitwise_and(dir_mask, mag_mask)
-        return combined_mask
-    
-    def flow_subtract_multiple(self, n_frames, direction_range, threshold, save=False):
-        masks = []
-        for index in range(n_frames):
-            print("Processing flow subtract for frame index:", index)
-            mask = self.flow_subtract(index, direction_range, threshold,save)
-            masks.append(mask)
-        return masks
-    
-    def background_subtract(self, frame, threshold, subtract_percentile = 50, normalize=False, norm_percentiles=(10,90)):
-        if self._background is None:
-            print("ERROR: Background not initialized. Call init_background() first.")
-            return None
-        bg_v = self._background.get_background_percentile(subtract_percentile).astype(np.float32)
-        v = frame.astype(np.float32)
-        
-        
-        if normalize:
-            p_low, p_high = norm_percentiles
-            bg_v_low = np.percentile(bg_v, p_low)
-            bg_v_high = np.percentile(bg_v, p_high)
-            v_low = np.percentile(v, p_low)
-            v_high = np.percentile(v, p_high)
-            v_range = max(1.0, v_high - v_low)
-            v_norm = (v - v_low) * (bg_v_high - bg_v_low) / v_range + bg_v_low
-        else:
-            v_norm = v
-
-        v_norm = np.clip(v_norm, 0, 255).astype(np.uint8)
-        print("AAAAAAAA. bg_v size:", bg_v.shape, " v_norm size:", v_norm.shape)
-        diff = cv2.absdiff(bg_v.astype(np.uint8), v_norm)
-        _, mask = cv2.threshold(diff, threshold, 255, cv2.THRESH_BINARY)
-        mask = cv2.medianBlur(mask, 5)  
-        return mask
-    
-    def background_subtract_multiple(self, frames, threshold, normalize=False, percentiles=(10,90)):
-        masks = []
-        for frame in frames:
-            mask = self.background_subtract(frame=frame, threshold=threshold, normalize=normalize, norm_percentiles=percentiles)
-            masks.append(mask)
-        return masks
-    
-    def fill_holes(self, mask):
-        h, w = mask.shape
-        flood_mask = np.zeros((h + 2, w + 2), np.uint8)
-        im_flood = mask.copy()
-        cv2.floodFill(im_flood, flood_mask, (0, 0), 255)
-        im_flood_inv = cv2.bitwise_not(im_flood)
-        return cv2.bitwise_or(mask, im_flood_inv)
-    
-    def fill_holes_multiple(self, masks):
-        filled = []
-        for mask in masks:
-            filled_mask = self.fill_holes(mask)
-            filled.append(filled_mask)
-        return filled
     
     def detect_blobs(self, mask, min_area, max_area=None, draw_boxes=True):
         output_img = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)

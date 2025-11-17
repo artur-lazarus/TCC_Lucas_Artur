@@ -1,4 +1,5 @@
 import numpy as np
+import cv2
 
 class Background:
     def __init__(self, W, H, size):

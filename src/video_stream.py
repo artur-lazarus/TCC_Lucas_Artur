@@ -38,13 +38,13 @@ class VideoStream:
         self.warped_W_out = W_out
 
     def get_frame_warped(self):
-        frame = self.get_frame()
+        frame_count, frame = self.get_frame()
         warped_frame = cv2.warpPerspective(frame, 
                                          self.H_matrix, 
                                          (self.warped_W_out, self.warped_H_out),
                                          flags=cv2.INTER_LINEAR,
                                          borderMode=cv2.BORDER_CONSTANT,
                                          borderValue=0)
-        return warped_frame
+        return (frame_count, warped_frame)
     
 video = VideoStream()

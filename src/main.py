@@ -4,6 +4,7 @@ import detection
 import cv2
 import numpy as np
 import os
+import json
 from video_stream import video
         
 
@@ -53,23 +54,16 @@ def main():
     d.start_tracker(kalman_sigma_a, kalman_sigma_z,
                     kalman_max_association_distance, kalman_max_age, kalman_min_hits)
     
-    
-    first_frame = video_frames_calibration[0]
-    
     while(detected_frame_count < detection_frame_count):
-        frame = video.get_frame()
-        if frame is not None:
-            time_before_detection = time.perf_counter()
-            debug_frame = d.process_frame(frame, visualize=visualize_detection)
-            time_after_detection = time.perf_counter()
-            print(f"Detection time for frame {detected_frame_count}: {time_after_detection - time_before_detection:.4f} seconds")
-            if visualize_detection and debug_frame is not None:
-                cv2.imshow("Detection", debug_frame)
-                cv2.waitKey(1)
-        if d.tracker.new_finished_tracks > 0:
-            finished_tracks = d.tracker.retrieve_finished_tracks()
-            for track, avg_speed in finished_tracks:
-                print(f"Track {track.id} finished with average speed {avg_speed:.3f} px/s")
+        time_before_detection = time.perf_counter()
+        debug_frame = d.process_frame(visualize=visualize_detection)
+        time_after_detection = time.perf_counter()
+        print(f"Detection time for frame {detected_frame_count}: {time_after_detection - time_before_detection:.4f} seconds")
+
+        if visualize_detection and debug_frame is not None:
+            cv2.imshow("Detection", debug_frame)
+            cv2.waitKey(1)
+
         detected_frame_count += 1
     
     all_tracks = d.tracker.get_average_velocity_per_track()
@@ -80,9 +74,42 @@ def main():
             fout.write(f"{track_id:8d} | {num_detections:10d} | {avg_speed:16.3f}\n")
     print(f"Saved: final_debug/tracks_summary.txt ({len(all_tracks)} tracks)")
 
+    # Create detailed tracks JSON
+    tracks_data = {"cars": []}
+    
+    # Get all tracks including finished ones
+    all_track_objects = d.tracker._tracks + [t for t, _ in d.tracker._finished_tracks]
+    
+    for track in all_track_objects:
+        if len(track.history) < 1:
+            continue
+            
+        # Calculate average velocity
+        avg_vel_x = d.tracker.get_track_average_velocity(track)
+        
+        # Build frame stats from history
+        frame_stats = []
+        for frame_count, pos, vel_x in track.history:
+            frame_stats.append({
+                "frame_count": frame_count,
+                "pos_x": pos[0],
+                "pos_y": pos[1],
+                "vel_x": vel_x
+            })
+        
+        car_data = {
+            "id": track.id,
+            "average_velocity": avg_vel_x,
+            "frame_stats": frame_stats
+        }
+        tracks_data["cars"].append(car_data)
+    
+    with open("final_debug/tracks.json", "w") as fout:
+        json.dump(tracks_data, fout, indent=2)
+    print(f"Saved: final_debug/tracks.json ({len(tracks_data['cars'])} cars)")
+
 
         
 
 if __name__ == "__main__":
-    global video
     main()

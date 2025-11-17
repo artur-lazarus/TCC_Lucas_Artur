@@ -77,7 +77,7 @@ class Track:
     hits: int = 0
     time_since_update: int = 0
     age: int = 0
-    history: list = field(default_factory=list)
+    history: list = field(default_factory=list)  # [[frame, (x, y), vel_x], ...]
     filtered_states: list = field(default_factory=list)
     filtered_covs: list = field(default_factory=list)
 
@@ -97,15 +97,17 @@ class Track:
             x=x, P=P, F=F, H=H, Q=Q, R=R
         )
 
-    def predict(self):
+    def predict(self, frame_count: int):
         self.x = self.F @ self.x
         self.P = self.F @ self.P @ self.F.T + self.Q
         self.filtered_states.append(self.x.copy())
         self.filtered_covs.append(self.P.copy())
         self.age += 1
         self.time_since_update += 1
-        # Store latest predicted position for visualization/debug
-        self.history.append(self.position())
+        # Store frame_count, predicted position, and x velocity
+        pos = self.position()
+        vel_x = float(self.x[2, 0])
+        self.history.append([frame_count, pos, vel_x])
 
     def update(self, z: Point):
         z = np.array([[z[0]], [z[1]]], dtype=float)
@@ -185,9 +187,9 @@ class Tracker:
         # Only return tracks that have matured (optional).
         return [t for t in self._tracks if t.hits >= self.min_hits or t.time_since_update == 0]
 
-    def _predict_all(self):
+    def _predict_all(self, frame_count: int):
         for t in self._tracks:
-            t.predict()
+            t.predict(frame_count)
 
     @staticmethod
     def _pairwise_dist(A: List[Point], B: List[Point]) -> np.ndarray:
@@ -231,7 +233,7 @@ class Tracker:
         unmatched_dets = [j for j in range(cost.shape[1]) if j not in used_dets]
         return matches, unmatched_tracks, unmatched_dets
 
-    def update(self, detections: List[Point]):
+    def update(self, detections: List[Point], frame_count: int):
         # First: try to pair current detections with newborns (one-frame cache)
         born = []
         if self._newborns:
@@ -252,7 +254,7 @@ class Tracker:
             detections = [d for k, d in enumerate(detections) if k not in born]
 
         # 1) Predict everyone
-        self._predict_all()
+        self._predict_all(frame_count)
 
         # 2) Associate remaining detections to predicted tracks
         pred_positions = [t.position() for t in self._tracks]
