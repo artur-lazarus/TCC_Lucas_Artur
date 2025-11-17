@@ -230,8 +230,8 @@ def get_lanes_y_pxs(n_frames, background_warped, min_area_for_car_detection):
     for i in range(n_frames):
         warped_frame = video.get_frame_warped()[1]
         mask = detection.fill_holes(
-                background.background_subtract(
-                    warped_frame, background_warped, 
+                background_warped.background_subtract(
+                    warped_frame, 
                     threshold=background_subtract_threshold, 
                     subtract_percentile=50, normalize=True))
         bbox_image, all_bboxes, bbox_areas = detection.detect_blobs(mask, min_area = min_area_for_car_detection)
@@ -337,7 +337,9 @@ def calculate_roi_polygon(n_frames, car_direction_range):
     pts_roi, stats_roi, tl_roi, kicks_roi = roi_maker.fit_polygon_to_mask_optimized(bg, roi_polygon_sides, target_coverage=roi_space_coverage)
     polygon_points = np.array(pts_roi, dtype=np.int32)
     cv2.polylines(roi_visual, [polygon_points], True, (0, 255, 0), 2)
-    cv2.imwrite("test_output/calibration_debug/roi_on_mask.png", roi_visual)
+    print("Time17: " + str(time.perf_counter()))
+    cv2.imwrite("final_debug/roi_on_mask.png", roi_visual)
+    print("Time18: " + str(time.perf_counter()))
     return np.array(pts_roi, dtype=np.int32)
 
 def calibrate(show_video = False):
@@ -391,7 +393,7 @@ def calibrate(show_video = False):
 
     r1, r2, r3 = homography.get_rotation_matrix_from_vps(road_vp, perpendicular_vp, K_matrix)
     H_matrix, (W_out, H_out) = homography.build_img_to_bird_homography(
-        frame.shape, K_matrix, r1, r2, scale=None, margin=0.01, roi_polygon=polygon_pts, target_width_px=1280.0
+        frame.shape, K_matrix, r1, r2, scale=None, margin=0.01, roi_polygon=polygon_pts, target_width_px=1920.0
     )
     video.set_warping_configs(H_matrix, W_out, H_out)
     
@@ -445,7 +447,7 @@ def calibrate(show_video = False):
     cv2.imwrite("test_output/calibration_debug/warped_example.png", warped_example)
     print("Saved: test_output/calibration_debug/warped_example.png")
 
-    return H_matrix, polygon_pts, H_out, W_out, lanes_y_pxs, background_warped._background, road_vp, perpendicular_vp, K_matrix, r1, r2, r3, f, scale_lambda
+    return H_matrix, polygon_pts, H_out, W_out, lanes_y_pxs, scale_lambda, background_warped._background
 
 if __name__ == "__main__":
     time0 = time.perf_counter()

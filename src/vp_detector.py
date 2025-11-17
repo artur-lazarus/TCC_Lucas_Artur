@@ -103,7 +103,7 @@ def _fit_lines_to_tracks(tracks, min_track_len=10, min_track_displacement=50):
     return lines
 
 
-def estimate_vp_u(min_valid_lines_to_stop=500, show_video=False):
+def estimate_vp_u(min_valid_lines_to_stop=200, show_video=False):
     """
     Estimates the road direction vanishing point (u) using KLT tracking.
     
@@ -447,7 +447,7 @@ def estimate_vp_v(vp_u, plate_detector, show_video=False):
     collected_plate_angles = []
     required_good_plates = 10
     good_plate_count = 0
-    required_filtered_lines = 2500
+    required_filtered_lines = 2000
     accumulated_filtered_lines = []
     
     # Phase 1: Plate Detection

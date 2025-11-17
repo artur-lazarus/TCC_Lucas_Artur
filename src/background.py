@@ -203,16 +203,19 @@ class Background:
         return mask
     
     def background_subtract_yolo(self, frame, conf_threshold=0.8):
-        # Vehicle classes in COCO: car (2), motorcycle (3), bus (5), truck (7)
         vehicle_classes = [2]
         model_path = "resources/yolov8l-seg.pt"
         
         model = YOLO(model_path)
         iou_threshold=0.7
         
-        # Run YOLOv8 segmentation
+        if len(frame.shape) == 2:
+            frame_bgr = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+        else:
+            frame_bgr = frame
+        
         results = model.predict(
-            frame,
+            frame_bgr,
             conf=conf_threshold,
             iou=iou_threshold,
             classes=vehicle_classes,

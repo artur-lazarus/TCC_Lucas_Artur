@@ -382,7 +382,7 @@ def estimate_scale(vp1, vp2, vp3, show_video=False):
     global VP1, VP2, VP3, H
     
     VP1, VP2, VP3, H = vp1, vp2, vp3, video.H_matrix
-    min_measurements = 1000
+    min_measurements = 5
     
     logging.info(f"Collecting {min_measurements} width measurements for scale estimation")
     
@@ -393,13 +393,15 @@ def estimate_scale(vp1, vp2, vp3, show_video=False):
     
     all_measurements = []
     while len(all_measurements) < min_measurements:
-        frame_count, frame = video.get_frame_background_subtracted_yolo()
+        frame_count, frame = video.get_frame_with_roi()
         
         if frame is None:
             continue
         
+        mask = video._background.background_subtract_yolo(frame, conf_threshold=0.8)
+        
         if show_video:
-            widths, vis_data_list = _process_frame(frame, show_video=True)
+            widths, vis_data_list = _process_frame(mask, show_video=True)
             
             if video_writer is None and frame is not None:
                 frame_h, frame_w = frame.shape[:2]
@@ -462,7 +464,7 @@ def estimate_scale(vp1, vp2, vp3, show_video=False):
                 logging.info("Early exit requested by user")
                 break
         else:
-            widths = _process_frame(frame, show_video=False)
+            widths = _process_frame(mask, show_video=False)
         
         all_measurements.extend(widths)
         
