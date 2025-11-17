@@ -29,9 +29,35 @@ try:
             out[i] = val
         return out
 
+    @numba.njit(parallel=True, fastmath=True)
+    def _update_warm_numba(hist, ring, ring_head, frame_flat):
+        """
+        Warm-up phase update: only add new frame to hist + ring.
+        """
+        npx = frame_flat.shape[0]
+        for i in numba.prange(npx):
+            v = int(frame_flat[i])
+            hist[i, v] += 1
+            ring[i, ring_head] = v
+
+    @numba.njit(parallel=True, fastmath=True)
+    def _update_steady_numba(hist, ring, ring_head, frame_flat):
+        """
+        Steady-state update: remove old frame, add new frame.
+        """
+        npx = frame_flat.shape[0]
+        for i in numba.prange(npx):
+            old_v = int(ring[i, ring_head])
+            new_v = int(frame_flat[i])
+            hist[i, old_v] -= 1
+            hist[i, new_v] += 1
+            ring[i, ring_head] = new_v
+
 except ImportError:
     HAVE_NUMBA = False
     _percentile_from_hist_numba = None
+    _update_warm_numba = None
+    _update_steady_numba = None
 
 
 class Background:
@@ -51,32 +77,46 @@ class Background:
 
         self.loaded = 0  # how many frames have been ingested
 
+        # Precompute pixel indices for the NumPy fallback (avoids reallocating every update)
+        self._idx = np.arange(self.NPX, dtype=np.int32)
+
     # ---------------------------------------------------------
     def update(self, frame):
         """Add one new frame to the sliding histogram."""
-        f = frame.reshape(-1)
+        time0 = time.perf_counter()
+
+        # Ensure uint8 and contiguous 1D view
+        f = np.asarray(frame, dtype=np.uint8).ravel()
 
         if self.loaded < self.size:
             # WARM-UP PHASE: no removals
-            idx = np.arange(self.NPX)
-            self.hist[idx, f] += 1
-            self.ring[:, self.ring_head] = f
+            if HAVE_NUMBA and _update_warm_numba is not None:
+                _update_warm_numba(self.hist, self.ring, self.ring_head, f)
+            else:
+                # NumPy fallback
+                self.hist[self._idx, f] += 1
+                self.ring[:, self.ring_head] = f
 
             self.ring_head = (self.ring_head + 1) % self.size
             self.loaded += 1
+
+            print("Background update (warm-up) took: " + str(time.perf_counter() - time0))
             return
 
         # STEADY STATE: sliding window remove + add
-        old_vals = self.ring[:, self.ring_head]
+        if HAVE_NUMBA and _update_steady_numba is not None:
+            _update_steady_numba(self.hist, self.ring, self.ring_head, f)
+        else:
+            # NumPy fallback
+            old_vals = self.ring[:, self.ring_head]
+            self.hist[self._idx, old_vals] -= 1
+            self.hist[self._idx, f] += 1
+            self.ring[:, self.ring_head] = f
 
-        idx = np.arange(self.NPX)
-        self.hist[idx, old_vals] -= 1
-        self.hist[idx, f]       += 1
-
-        self.ring[:, self.ring_head] = f
         self.ring_head = (self.ring_head + 1) % self.size
-
         self.updated_since_last_median = True
+
+        print("Background update (steady) took: " + str(time.perf_counter() - time0))
 
     # ---------------------------------------------------------
     def _compute_background_percentile_image(self, percentile: float) -> np.ndarray:
@@ -85,6 +125,7 @@ class Background:
         fast numba loop if available, otherwise fall back to cumsum+argmax.
         Returns (H, W) uint8.
         """
+
         # Target count for the percentile
         target = int((percentile / 100.0) * self.size)
 
@@ -105,6 +146,7 @@ class Background:
         Returns the background percentile image (e.g., 50 = median).
         If not enough frames have been loaded, prints a warning and returns None.
         """
+        time0 = time.perf_counter()
         if self.loaded < self.size:
             print(f"[Background] Not enough frames yet ({self.loaded}/{self.size}). Returning None.")
             return None
@@ -121,7 +163,7 @@ class Background:
         self.last_bg_computed = bg_img.astype(np.uint8)
         self.last_bg_computed_percentile = percentile
         self.updated_since_last_median = False
-
+        print("Background percentile computation took: " + str(time.perf_counter() - time0))
         return self.last_bg_computed
 
     # ---------------------------------------------------------
