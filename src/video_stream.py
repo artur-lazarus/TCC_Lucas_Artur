@@ -30,8 +30,6 @@ class VideoStream:
             frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         if self.make_background and frame is not None:
             self._background.update(frame)
-        if self.roi_mask is not None:
-            frame = cv2.bitwise_and(frame, mask=self.roi_mask)
         return self.frame_count, frame
     
     def set_warping_configs(self, H_matrix, W_out, H_out):
@@ -54,8 +52,16 @@ class VideoStream:
     
     def get_frame_background_subtracted(self, threshold, subtract_percentile = 50, normalize=False, norm_percentiles=(10,90)):
         frame_count, frame = self.get_frame()
+        if self.roi_mask is not None:
+            frame = cv2.bitwise_and(frame, mask=self.roi_mask)
         mask = self._background.background_subtract(frame, threshold, subtract_percentile, normalize, norm_percentiles)
         bg_subtracted = cv2.bitwise_and(frame, frame, mask=mask)
         return frame_count, bg_subtracted
+    
+    def get_frame_with_roi(self):
+        frame_count, frame = self.get_frame()
+        if self.roi_mask is not None:
+            frame = cv2.bitwise_and(frame, mask=self.roi_mask)
+        return frame_count, frame
     
 video = VideoStream()
