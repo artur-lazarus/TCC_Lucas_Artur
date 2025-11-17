@@ -1,15 +1,10 @@
 Scene Scale Factor (λ)
 ==================================================
 
-Final Scale: 0.037700 meters/pseudo-unit
-Average Scale: 0.039511 meters/pseudo-unit
+Final Scale: 0.015895 meters/pseudo-unit
 
 Statistics:
-  Total vehicles measured: 136
-  Width samples: 0
-  Length samples: 0
-
-  Mode car width (pseudo-units): 48.02
-  Scale from car width: 0.037690 m/unit
-  Mode car length (pseudo-units): 108.64
-  Scale from car length: 0.041331 m/unit
+  Total vehicles measured: 19
+  Car width samples: 19
+  Mode car width (pseudo-units): 113.88
+  Real car width (meters): 1.81

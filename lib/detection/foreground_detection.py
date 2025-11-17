@@ -182,7 +182,7 @@ def detect_foreground_yolo_segmentation(
     model = YOLO(os.path.join(LIB_ROOT, "models", 'yolov8l-seg.pt'))
     
     # Vehicle classes in COCO: car (2), motorcycle (3), bus (5), truck (7)
-    vehicle_classes = [2, 3, 5, 7]
+    vehicle_classes = [2]
     
     foreground_masks = []
     for frame in frames:

@@ -12,9 +12,11 @@ import cv2
 import numpy as np
 import logging
 import time
+from diamond_space import DiamondSpace
+import matplotlib.pyplot as plt
 
 # -----------------------------------------------------------------------------
-# RANSAC and Line Geometry Helper Functions
+# Line Geometry Helper Functions
 # -----------------------------------------------------------------------------
 
 def fit_lines_to_tracks(tracks, 
@@ -71,44 +73,70 @@ def get_intersection(line1, line2):
     else:
         return None # Lines are parallel
 
-def find_vp_with_ransac(lines, iterations=1000, threshold=5.0):
-    """Robustly finds the vanishing point from a list of lines using RANSAC."""
-    best_vp = None
-    max_inliers = -1
+def find_vp_with_diamond_space(lines, frame_shape):
+    """
+    Finds the vanishing point from lines using the DiamondSpace accumulator.
     
-    start_time = time.time()
-    logging.info(f"Running RANSAC on {len(lines)} lines for {iterations} iterations (threshold={threshold}px)...")
-    
-    for _ in range(iterations):
-        if len(lines) < 2:
-            logging.warning("Need at least 2 lines for RANSAC.")
-            return None
-            
-        idx1, idx2 = np.random.choice(len(lines), 2, replace=False)
-        line1 = lines[idx1]
-        line2 = lines[idx2]
-
-        vp = get_intersection(line1, line2)
-        if vp is None:
-            continue
-            
-        x, y = vp
-        inliers_count = 0
-        for line in lines:
-            a, b, c = line
-            distance = abs(a * x + b * y + c) / np.sqrt(a**2 + b**2)
-            
-            if distance < threshold:
-                inliers_count += 1
+    Args:
+        lines: List of lines in (a, b, c) format where ax + by + c = 0
+        frame_shape: (height, width) of the frame for scaling
         
-        if inliers_count > max_inliers:
-            max_inliers = inliers_count
-            best_vp = vp
+    Returns:
+        Vanishing point as (x, y) tuple or None if failed
+    """
+    if not lines:
+        logging.error("No lines provided to DiamondSpace")
+        return None
     
-    end_time = time.time()
-    logging.info(f"RANSAC complete in {end_time - start_time:.2f} seconds.")
-    logging.info(f"Best VP: {best_vp} with {max_inliers} inliers.")
-    return best_vp
+    img_h, img_w = frame_shape
+    
+    # Lines are already in (A, B, C) format from fit_lines_to_tracks
+    lines_np = np.array(lines, dtype=np.float32)
+    
+    # Initialize and run DiamondSpace
+    logging.info(f"Inserting {len(lines_np)} motion lines into DiamondSpace...")
+    d_val = int(1.0 * max(img_w, img_h))
+    space_size = 128
+    
+    DS = DiamondSpace(d_val, space_size)
+    DS.insert(lines_np)
+    
+    # Find peaks
+    p, w, p_ds = DS.find_peaks(min_dist=8, prominence=0.9, t=0.35)
+    
+    if p is None or len(p) == 0:
+        logging.warning("DiamondSpace found no peaks.")
+        return None
+    
+    # Visualize the accumulator
+    logging.info("Displaying DiamondSpace accumulator for VP-u. Close plot to continue.")
+    A_img = DS.attach_spaces()
+    extent = ((-DS.size + 0.5) / DS.scale, (DS.size - 0.5) / DS.scale,
+              (DS.size - 0.5) / DS.scale, (-DS.size + 0.5) / DS.scale)
+    fig, ax = plt.subplots(1, 1, figsize=(6, 6))
+    ax.imshow(A_img, cmap="Greys", extent=extent)
+    if p_ds is not None and len(p_ds):
+        ax.plot(p_ds[:, 0] / DS.scale, p_ds[:, 1] / DS.scale, "r+", alpha=0.8, markersize=10)
+    ax.set(title="Diamond Space Accumulator for VP-u (Red+ = Peaks)")
+    ax.invert_yaxis()
+    
+    # Save plot
+    import os
+    THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+    output_dir = os.path.join(THIS_DIR, "output")
+    os.makedirs(output_dir, exist_ok=True)
+    plot_path = os.path.join(output_dir, "vp_u_diamond_space_accumulator.jpg")
+    plt.savefig(plot_path, dpi=150, bbox_inches='tight')
+    logging.info(f"Saved: vp_u_diamond_space_accumulator.jpg")
+    
+    plt.show()
+    
+    # Return the best peak
+    best_peak_xy = p[0][:2].astype(np.float32)
+    best_weight = w[0]
+    logging.info(f"DiamondSpace found VP-u: {best_peak_xy} with weight {best_weight:.2f}")
+    
+    return tuple(best_peak_xy)
 
 # -----------------------------------------------------------------------------
 # Main Feature Tracking and VP Estimation
@@ -328,11 +356,14 @@ def estimate_vanishing_point_u(video_path,
     if len(all_valid_lines) < 10: # Use a small hardcoded minimum
         logging.error(f"Found only {len(all_valid_lines)} valid lines. Cannot estimate vanishing point.")
         return None
-        
-    vanishing_point_u = find_vp_with_ransac(
-        all_valid_lines, # Pass the pre-filtered lines
-        iterations=ransac_iterations, 
-        threshold=ransac_threshold
+    
+    # Get frame shape for DiamondSpace
+    frame_shape = old_gray.shape[:2]
+    
+    # Use DiamondSpace instead of RANSAC
+    vanishing_point_u = find_vp_with_diamond_space(
+        all_valid_lines,  # Pass the pre-filtered lines
+        frame_shape
     )
     
     return vanishing_point_u

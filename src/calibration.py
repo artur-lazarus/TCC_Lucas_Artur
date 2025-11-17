@@ -251,7 +251,7 @@ def calculate_roi_polygon(n_frames, car_direction_range):
         curr=video.get_frame()[1]
         optical_flow_polar = optical_flow.flow_to_polar(optical_flow.calculate_optical_flow(prev, curr, dis_preset="FAST"))
         flow_mask = optical_flow.flow_subtract(optical_flow_polar, car_direction_range, flow_magnitude_threshold)
-        bg_mask = background.background_subtract(curr, video._background, threshold=background_subtraction_threshold, subtract_percentile=50)
+        bg_mask = video.background_subtract(curr, threshold=background_subtraction_threshold, subtract_percentile=50)
         and_mask = cv2.bitwise_and(flow_mask, bg_mask)
         filled_mask = detection.fill_holes(and_mask)
         meta_background.update(filled_mask)
@@ -294,8 +294,14 @@ def calibrate():
     cy = h // 2
     timec3 = time.perf_counter()
     print(f"Basic intrinsics estimation time: {timec3 - timec2:.3f} seconds")
+    
+    # Create binary ROI mask from polygon
+    roi_mask = np.zeros((h, w), dtype=np.uint8)
+    cv2.fillPoly(roi_mask, [polygon_pts], 255)
+    video.set_roi_mask(roi_mask)
 
     # VP calculation
+
 
     # Homography calculation
     f = homography.f_from_two_orthogonal_vps(road_vp, perpendicular_vp, cx, cy)

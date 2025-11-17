@@ -10,7 +10,7 @@ from video_stream import video
 
 def main():
     time0 = time.perf_counter()
-    input_video_path = "dataset/session0_left/video.avi"
+    input_video_path = "assets/video.avi"
     colour = False
     start_frame = 100
     original_fps = 50

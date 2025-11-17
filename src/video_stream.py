@@ -3,7 +3,7 @@ import background
 
 class VideoStream:
     def __init__(self):
-        pass
+        self.roi_mask = None
 
     def set_config(self, video_path, frame_interval=1, colour=True, make_background=False):
         self.cap = cv2.VideoCapture(video_path)
@@ -36,6 +36,9 @@ class VideoStream:
         self.H_matrix=H_matrix
         self.warped_H_out = H_out
         self.warped_W_out = W_out
+        
+    def set_roi_mask(self, mask):
+        self.roi_mask = mask
 
     def get_frame_warped(self):
         frame_count, frame = self.get_frame()
@@ -46,5 +49,19 @@ class VideoStream:
                                          borderMode=cv2.BORDER_CONSTANT,
                                          borderValue=0)
         return (frame_count, warped_frame)
+    
+    def get_frame_background_subtracted(self, threshold, subtract_percentile = 50, normalize=False, norm_percentiles=(10,90)):
+        frame_count, frame = self.get_frame()
+        if self.roi_mask is not None:
+            frame = cv2.bitwise_and(frame, mask=self.roi_mask)
+        mask = self._background.background_subtract(frame, threshold, subtract_percentile, normalize, norm_percentiles)
+        bg_subtracted = cv2.bitwise_and(frame, frame, mask=mask)
+        return frame_count, bg_subtracted
+    
+    def get_frame_with_roi(self):
+        frame_count, frame = self.get_frame()
+        if self.roi_mask is not None:
+            frame = cv2.bitwise_and(frame, mask=self.roi_mask)
+        return frame_count, frame
     
 video = VideoStream()

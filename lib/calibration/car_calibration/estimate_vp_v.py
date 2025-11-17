@@ -35,7 +35,7 @@ DETECT_PLATE_DIR = os.path.abspath(os.path.join(THIS_DIR, "..", "..", "detect_pl
 if DETECT_PLATE_DIR not in sys.path:
     sys.path.insert(0, DETECT_PLATE_DIR)
 
-from detect_plate_slow import PlateDetector
+from detect_plate import PlateDetector
 
 # --- Import DiamondSpace and Matplotlib ---
 try:
@@ -458,7 +458,7 @@ def estimate_vanishing_point_v(detection_obj, fg_masks, vp_u, mask_path=None,
         # --- PHASE 1: Detect plates every frame until we have 10 ---
         if phase == 1 and plate_detector is not None:
             masked_frame = cv2.bitwise_and(gray_frame, gray_frame, mask=final_mask)
-            frame_bgr = cv2.cvtColor(masked_frame, cv2.COLOR_GRAY2BGR)
+            frame_bgr = masked_frame
             plate_boxes = plate_detector.detect(frame_bgr, size=640, save_crops=False)
             
             if len(plate_boxes) > 0:

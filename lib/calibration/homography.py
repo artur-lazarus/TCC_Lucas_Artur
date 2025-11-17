@@ -39,16 +39,41 @@ def get_rotation_matrix_from_vps(vertical_vp_px, road_vp_px, K):
     r1, r2, r3 = R[:,0], R[:,1], R[:,2]
     return r1, r2, r3
 
-def build_img_to_bird_homography(img_shape, K, r1, r2, scale=None, margin=0.02, roi_polygon=None, target_width_px=1280.0):
+def build_img_to_bird_homography(img_shape, K, r1, r2, r3=None, scale=None, margin=0.02, roi_polygon=None, target_width_px=1280.0):
     """
     Returns M_img_to_bird (3x3) and (W_out, H_out).
+    
+    Builds homography from image to bird's eye view (ground plane) using rotation matrix axes:
+    - r1: forward direction (along road)
+    - r2: side direction (across road)  
+    - r3: vertical direction (up from ground)
+    
+    These axes are typically obtained from get_rotation_matrix_from_two_vps() using
+    two horizontal VPs (road direction and perpendicular direction).
+    
     Uses H_img->plane = (K [r1 r2 -r3])^{-1}. Global scale is arbitrary;
     we set t ∝ -r3 which is valid since homographies are up to scale.
+    
+    Args:
+        img_shape: (height, width) of the image
+        K: 3x3 camera intrinsics matrix
+        r1: Unit vector for forward (road) direction
+        r2: Unit vector for side (perpendicular) direction
+        r3: Optional unit vector for vertical direction. If None, computed as r1 × r2
+        scale: Optional scale factor (pixels per world unit)
+        margin: Expansion margin for output bounds (default: 0.02)
+        roi_polygon: Optional ROI polygon to constrain output bounds
+        target_width_px: Target width in pixels when scale is auto-computed
     """
     r1 = np.asarray(r1, dtype=np.float64)
     r2 = np.asarray(r2, dtype=np.float64)
     r1 /= np.linalg.norm(r1); r2 /= np.linalg.norm(r2)
-    r3 = np.cross(r1, r2); r3 /= np.linalg.norm(r3)
+    
+    if r3 is None:
+        r3 = np.cross(r1, r2)
+    else:
+        r3 = np.asarray(r3, dtype=np.float64)
+    r3 /= np.linalg.norm(r3)
 
     H_plane_to_img = K @ np.column_stack((r1, r2, -r3))  # t ∝ -r3
     H_img_to_plane = np.linalg.inv(H_plane_to_img)
@@ -202,8 +227,48 @@ def _debug_dump(image, K, r1, r2, H_img_to_plane, M_img_to_bird, out_size, out_d
     cv2.imwrite(os.path.join(out_dir, "original.png"), img_vis)
     cv2.imwrite(os.path.join(out_dir, "bird_boundary.png"), bird_dbg)
 
+def get_rotation_matrix_from_two_vps(vp_forward_px, vp_side_px, K):
+    """
+    Build camera axes:
+      r1 = forward (road direction)
+      r2 = side (across road)
+      r3 = up    (vertical)
+    """
+    # Convert VPs to directions
+    f = pixel_vp_to_cam_dir(vp_forward_px, K)
+    s = pixel_vp_to_cam_dir(vp_side_px, K)
+
+    # Normalize
+    f /= np.linalg.norm(f)
+    s /= np.linalg.norm(s)
+
+    # r3 = vertical = f × s
+    r3 = np.cross(f, s)
+    n3 = np.linalg.norm(r3)
+    if n3 < 1e-12:
+        raise ValueError("The two VPs are nearly collinear.")
+    r3 /= n3
+
+    # Re-orthogonalize r1 against r3
+    r1 = f - np.dot(f, r3) * r3
+    r1 /= np.linalg.norm(r1)
+
+    # r2 from right-handed cross
+    r2 = np.cross(r3, r1)
+    r2 /= np.linalg.norm(r2)
+
+    # Enforce orthonormality via SVD
+    R = np.column_stack([r1, r2, r3])
+    U, _, Vt = np.linalg.svd(R)
+    R = U @ Vt
+
+    if np.linalg.det(R) < 0:
+        R[:, 1] *= -1
+
+    return R[:,0], R[:,1], R[:,2]
+
 def main():
-    input_image_path = "dataset/session0_center/screen.png"
+    input_image_path = "assets/frame_280.png"
     # If you truly want grayscale, read as such:
     image = cv2.imread(input_image_path, cv2.IMREAD_GRAYSCALE)
     if image is None:
@@ -213,26 +278,26 @@ def main():
     
 
     # TODO: your detected vanishing points in pixel coords
-    vertical_vp_px = (-5379.92779268, 73377.21463969)
-    road_vp_px     = (120.20467933, 18.06131721)
-    #vertical_vp_px = (-434.0, 17851.0)
-    #road_vp_px     = (163, 47)
+    # VP in the road direction (forward)
+    vp_side_px = (-2822.459, 41.307095)
+    # VP in the perpendicular direction (side/across road)
+    vp_forward_px = (1984.2766, -507.85928)
 
-    f=f_from_two_orthogonal_vps(vertical_vp_px, road_vp_px, 960.0, 540.0)
+    f=f_from_two_orthogonal_vps(vp_forward_px, vp_side_px, 960.0, 540.0)
     K = np.array([
         [ f,   0.0, 960.0],
         [   0.0, f, 540.0],
         [   0.0,   0.0,   1.0]
     ], dtype=np.float64)
 
-    r1, r2, r3 = get_rotation_matrix_from_vps(vertical_vp_px, road_vp_px, K)
+    r1, r2, r3 = get_rotation_matrix_from_two_vps(vp_forward_px, vp_side_px, K)
     # Optional: only dewarp pixels inside a polygon (in image pixel coords)
     # Example: uncomment and edit the points below (clockwise or ccw)
     # polygon_pts = np.array([[100,600],[500,400],[1200,420],[900,700]], dtype=np.int32)
-    polygon_pts = np.array([(315,165),(185,174),(612,1069), (1740,1072)], dtype=np.int32)
+    polygon_pts = np.array([(1711,125),(1180,88),(168,807), (1321,1075)], dtype=np.int32)
 
     M_img_to_bird, (W_out, H_out) = build_img_to_bird_homography(
-        image.shape, K, r1, r2, scale=None, margin=0.01, roi_polygon=polygon_pts, target_width_px=1280.0
+        image.shape, K, r1, r2, r3, scale=None, margin=0.01, roi_polygon=polygon_pts, target_width_px=1920
     )
     print(f"[DEBUG] bird output size: W_out={W_out}, H_out={H_out}")
     print("Matrix:", M_img_to_bird)
@@ -280,7 +345,7 @@ def main():
         M_img_to_bird,
         (W_out, H_out),
         debug_dir,
-        vps_px=[("vertical_vp", vertical_vp_px), ("road_vp", road_vp_px)],
+        vps_px=[("vp_forward", vp_forward_px), ("vp_side", vp_side_px)],
     )
     # Save bird image to disk as well
     cv2.imwrite(os.path.join(debug_dir, "bird.png"), bird)
