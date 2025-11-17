@@ -1,5 +1,6 @@
 import cv2
 import numpy as np
+import numba
 
 def calculate_optical_flow_multiple(
     frames,
@@ -41,9 +42,9 @@ def calculate_optical_flow(first_frame, second_frame, dis_preset="FAST"):
     flow = dis.calc(first_frame, second_frame, None)
     return flow
 
-def flow_to_polar(flow):
-    fx, fy = flow[..., 0], flow[..., 1]
-    magnitude, angle = cv2.cartToPolar(fx, fy)
+def flow_to_polar(flow): 
+    fx, fy = flow[..., 0], flow[..., 1] 
+    magnitude, angle = cv2.cartToPolar(fx, fy) 
     return magnitude, angle
 
 def flow_to_polar_multiple(flows):

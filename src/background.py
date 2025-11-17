@@ -116,7 +116,7 @@ class Background:
         self.ring_head = (self.ring_head + 1) % self.size
         self.updated_since_last_median = True
 
-        print("Background update (steady) took: " + str(time.perf_counter() - time0))
+        #print("Background update (steady) took: " + str(time.perf_counter() - time0))
 
     # ---------------------------------------------------------
     def _compute_background_percentile_image(self, percentile: float) -> np.ndarray:
@@ -163,7 +163,7 @@ class Background:
         self.last_bg_computed = bg_img.astype(np.uint8)
         self.last_bg_computed_percentile = percentile
         self.updated_since_last_median = False
-        print("Background percentile computation took: " + str(time.perf_counter() - time0))
+        #print("Background percentile computation took: " + str(time.perf_counter() - time0))
         return self.last_bg_computed
 
     # ---------------------------------------------------------
