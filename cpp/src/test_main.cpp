@@ -2,7 +2,7 @@
 #include <iostream>
 #include <string>
 
-int main(int argc, char** argv) {
+int test_main(int argc, char** argv) {
     std::cout << "=== Traffic Speed Detection System ===" << std::endl;
     std::cout << "=== IMX477 Camera Performance Test ===\n" << std::endl;
     

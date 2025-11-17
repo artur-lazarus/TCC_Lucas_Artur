@@ -9,6 +9,9 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # Find OpenCV
 find_package(OpenCV REQUIRED)
 
+# Find Eigen (required by tracker)
+find_package(Eigen3 REQUIRED)
+
 # Find libcamera via pkg-config and threads
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(LIBCAMERA REQUIRED IMPORTED_TARGET libcamera)
@@ -18,6 +21,7 @@ find_package(Threads REQUIRED)
 include_directories(
     ${CMAKE_SOURCE_DIR}/include
     ${OpenCV_INCLUDE_DIRS}
+    ${EIGEN3_INCLUDE_DIR}
 )
 
 # Collect all source files from src directory
@@ -33,6 +37,7 @@ target_link_libraries(tcc PRIVATE
     PkgConfig::LIBCAMERA
     Threads::Threads
     ${OpenCV_LIBS}
+    Eigen3::Eigen
 )
 
 # Compiler warnings

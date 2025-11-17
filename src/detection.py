@@ -9,12 +9,13 @@ class Detection:
     def __init__(self):
         self._background = None
 
-    def insert_calibration(self, H_matrix, roi_polygon, H_out, W_out, lanes_y_pxs, fps):
+    def insert_calibration(self, H_matrix, roi_polygon, H_out, W_out, lanes_y_pxs, scale_lambda, fps):
         self.H_matrix = H_matrix
         self.roi_polygon = roi_polygon
         self.H_out = H_out
         self.W_out = W_out
         self.lanes_y_pxs = lanes_y_pxs
+        self.scale_lambda = scale_lambda
         self.fps = fps
 
     def start_tracker(self,kalman_sigma_a, kalman_sigma_z,
