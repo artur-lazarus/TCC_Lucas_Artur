@@ -1,5 +1,38 @@
 import numpy as np
 import cv2
+import time
+
+# Optional acceleration with numba
+try:
+    import numba
+
+    HAVE_NUMBA = True
+
+    @numba.njit(parallel=True, fastmath=True)
+    def _percentile_from_hist_numba(hist, target):
+        """
+        hist: (N, 256) uint16
+        target: int (0..size)
+        returns: (N,) uint8
+        """
+        npx, nbins = hist.shape
+        out = np.empty(npx, np.uint8)
+        for i in numba.prange(npx):
+            h = hist[i]
+            cum = 0
+            val = 0
+            for b in range(nbins):
+                cum += h[b]
+                if cum >= target:
+                    val = b
+                    break
+            out[i] = val
+        return out
+
+except ImportError:
+    HAVE_NUMBA = False
+    _percentile_from_hist_numba = None
+
 
 class Background:
     def __init__(self, W, H, size):
@@ -25,7 +58,8 @@ class Background:
 
         if self.loaded < self.size:
             # WARM-UP PHASE: no removals
-            self.hist[np.arange(self.NPX), f] += 1
+            idx = np.arange(self.NPX)
+            self.hist[idx, f] += 1
             self.ring[:, self.ring_head] = f
 
             self.ring_head = (self.ring_head + 1) % self.size
@@ -35,13 +69,35 @@ class Background:
         # STEADY STATE: sliding window remove + add
         old_vals = self.ring[:, self.ring_head]
 
-        self.hist[np.arange(self.NPX), old_vals] -= 1
-        self.hist[np.arange(self.NPX), f]       += 1
+        idx = np.arange(self.NPX)
+        self.hist[idx, old_vals] -= 1
+        self.hist[idx, f]       += 1
 
         self.ring[:, self.ring_head] = f
         self.ring_head = (self.ring_head + 1) % self.size
 
         self.updated_since_last_median = True
+
+    # ---------------------------------------------------------
+    def _compute_background_percentile_image(self, percentile: float) -> np.ndarray:
+        """
+        Internal helper: compute percentile image from hist using
+        fast numba loop if available, otherwise fall back to cumsum+argmax.
+        Returns (H, W) uint8.
+        """
+        # Target count for the percentile
+        target = int((percentile / 100.0) * self.size)
+
+        if HAVE_NUMBA and _percentile_from_hist_numba is not None:
+            # Fast compiled path: scan each row until cumulative >= target
+            values_flat = _percentile_from_hist_numba(self.hist, target)
+        else:
+            # Fallback: original logic (slower, but same result)
+            c = np.cumsum(self.hist, axis=1, dtype=np.uint32)
+            values_flat = np.argmax(c >= target, axis=1).astype(np.uint8)
+
+        img = values_flat.reshape(self.H, self.W)
+        return img
 
     # ---------------------------------------------------------
     def get_background_percentile(self, percentile):
@@ -52,47 +108,53 @@ class Background:
         if self.loaded < self.size:
             print(f"[Background] Not enough frames yet ({self.loaded}/{self.size}). Returning None.")
             return None
-        
-        if (not self.updated_since_last_median) and (self.last_bg_computed_percentile == percentile):
+
+        if (not self.updated_since_last_median) and \
+           (self.last_bg_computed is not None) and \
+           (self.last_bg_computed_percentile == percentile):
+            # Cached value still valid
             return self.last_bg_computed
 
-        # Compute cumulative histogram per pixel
-        c = np.cumsum(self.hist, axis=1)
+        # Fast percentile computation
+        bg_img = self._compute_background_percentile_image(percentile)
 
-        # Target count for the percentile
-        target = int((percentile / 100.0) * self.size)
-
-        # argmax finds first bin where cumulative >= target
-        values = np.argmax(c >= target, axis=1)
-
-        self.last_bg_computed = values.reshape(self.H, self.W).astype(np.uint8)
+        self.last_bg_computed = bg_img.astype(np.uint8)
         self.last_bg_computed_percentile = percentile
         self.updated_since_last_median = False
 
-        return values.reshape(self.H, self.W).astype(np.uint8)
-    
-    def background_subtract(self, frame, threshold, subtract_percentile = 50, normalize=False, norm_percentiles=(10,90)):
-            if self is None or self.loaded < self.size:
-                print("ERROR: Background not initialized or not enough frames loaded. Call init_background() first.")
-                return None
-            bg_v = self.get_background_percentile(subtract_percentile).astype(np.float32)
-            v = frame.astype(np.float32)
-            
-            
-            if normalize:
-                p_low, p_high = norm_percentiles
-                bg_v_low = np.percentile(bg_v, p_low)
-                bg_v_high = np.percentile(bg_v, p_high)
-                v_low = np.percentile(v, p_low)
-                v_high = np.percentile(v, p_high)
-                v_range = max(1.0, v_high - v_low)
-                v_norm = (v - v_low) * (bg_v_high - bg_v_low) / v_range + bg_v_low
-            else:
-                v_norm = v
+        return self.last_bg_computed
 
-            v_norm = np.clip(v_norm, 0, 255).astype(np.uint8)
-            print("AAAAAAAA. bg_v size:", bg_v.shape, " v_norm size:", v_norm.shape)
-            diff = cv2.absdiff(bg_v.astype(np.uint8), v_norm)
-            _, mask = cv2.threshold(diff, threshold, 255, cv2.THRESH_BINARY)
-            mask = cv2.medianBlur(mask, 5)  
-            return mask
+    # ---------------------------------------------------------
+    def background_subtract(self, frame, threshold,
+                            subtract_percentile=50,
+                            normalize=False,
+                            norm_percentiles=(10, 90)):
+        if self is None or self.loaded < self.size:
+            print("ERROR: Background not initialized or not enough frames loaded. Call init_background() first.")
+            return None
+
+        bg_v_u8 = self.get_background_percentile(subtract_percentile)
+        if bg_v_u8 is None:
+            return None
+
+        # Convert to float32 only if we need normalization
+        bg_v = bg_v_u8.astype(np.float32)
+        v = frame.astype(np.float32)
+
+        if normalize:
+            p_low, p_high = norm_percentiles
+            bg_v_low = np.percentile(bg_v, p_low)
+            bg_v_high = np.percentile(bg_v, p_high)
+            v_low = np.percentile(v, p_low)
+            v_high = np.percentile(v, p_high)
+            v_range = max(1.0, v_high - v_low)
+            v_norm = (v - v_low) * (bg_v_high - bg_v_low) / v_range + bg_v_low
+        else:
+            v_norm = v
+
+        v_norm_u8 = np.clip(v_norm, 0, 255).astype(np.uint8)
+
+        diff = cv2.absdiff(bg_v_u8, v_norm_u8)
+        _, mask = cv2.threshold(diff, threshold, 255, cv2.THRESH_BINARY)
+        mask = cv2.medianBlur(mask, 5)
+        return mask

@@ -17,7 +17,7 @@ def main():
     target_fps = 10
     frame_interval = original_fps // target_fps
     detection_frame_count = 1000
-    video_background_window_size = 800
+    video_background_window_size = 400
     visualize_detection = True
     video_resolution = (1920, 1080)  # (W, H)
 

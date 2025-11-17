@@ -267,8 +267,8 @@ def calculate_roi_polygon(n_frames, car_direction_range):
 
 def calibrate():
     """Calibrate camera parameters from video frames."""
-    main_movement_range_frame_number = 800
-    roi_polygon_frame_number = 800
+    main_movement_range_frame_number = 200
+    roi_polygon_frame_number = 200
     warped_bg_window_size = 800
     get_lanes_frame_number = 800
 
@@ -289,7 +289,7 @@ def calibrate():
 
     # Basic intrinsics estimation
     frame=video.get_frame()[1]
-    w,h = frame[0].shape[1], frame[0].shape[0]
+    w,h = frame.shape[1], frame.shape[0]
     cx = w // 2
     cy = h // 2
     timec3 = time.perf_counter()

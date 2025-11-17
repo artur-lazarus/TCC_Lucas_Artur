@@ -113,5 +113,4 @@ if __name__ == "__main__":
     for i in range(10):
         _, frame = test_video.get_frame()
         frames.append(frame)
-        print("Time1: " + str(time.perf_counter()))
         calculate_optical_flow(frames[i], frames[i+1])
