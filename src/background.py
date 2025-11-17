@@ -100,7 +100,7 @@ class Background:
             self.ring_head = (self.ring_head + 1) % self.size
             self.loaded += 1
 
-            print("Background update (warm-up) took: " + str(time.perf_counter() - time0))
+            #print("Background update (warm-up) took: " + str(time.perf_counter() - time0))
             return
 
         # STEADY STATE: sliding window remove + add

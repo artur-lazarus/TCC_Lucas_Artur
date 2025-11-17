@@ -60,11 +60,10 @@ def flow_subtract(flow_polar, direction_range, threshold, save=False):
             dir_min, dir_max = dir_max, dir_min
         dir_mask = cv2.inRange(flow_polar[1], dir_min, dir_max)
         mag_mask = cv2.inRange(flow_polar[0], threshold, 1e6)
+        #cv2.imshow("Direction Mask", dir_mask)
+        #cv2.waitKey(1)
         combined_mask = cv2.bitwise_and(dir_mask, mag_mask)
         return combined_mask
-
-
-
 
 
 def optical_flow_to_motion_masks(flows, magnitude_threshold=2.0):

@@ -103,6 +103,46 @@ def select_greedy_hue_window(counts, window_size=None, coverage_threshold=None):
     return best_start, best_end, chosen
 
 
+import matplotlib.pyplot as plt
+import numpy as np
+
+def debug_plot_histogram(counts, start_idx=None, end_idx=None, chosen_bins=None, title="Histogram Debug"):
+    counts = np.asarray(counts)
+
+    N = counts.size
+    xs = np.arange(N)
+
+    plt.figure(figsize=(10, 4))
+    plt.title(title)
+
+    # Plot full histogram
+    plt.bar(xs, counts, color="lightgray", label="All bins")
+
+    # Highlight chosen bins
+    if chosen_bins is not None and len(chosen_bins) > 0:
+        plt.bar(xs[chosen_bins], counts[chosen_bins], color="tab:blue", label="chosen bins")
+
+    # Highlight window arc
+    if start_idx is not None and end_idx is not None:
+        # circular case
+        if start_idx <= end_idx:
+            win = np.arange(start_idx, end_idx + 1)
+        else:
+            win = np.r_[np.arange(start_idx, N), np.arange(0, end_idx + 1)]
+
+        plt.bar(xs[win], counts[win], color="tab:orange", alpha=0.6, label="selected window")
+
+        # draw vertical lines for boundaries
+        plt.axvline(start_idx, color="green", linestyle="--", label="start")
+        plt.axvline(end_idx, color="red", linestyle="--", label="end")
+
+    plt.xlabel("Bin index")
+    plt.ylabel("Weight")
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
+
 def get_main_movement_range(n_frames, coverage_threshold=None, window_size=None, magnitude_threshold=2.0):
     """Find dominant flow orientation range via weighted histogram.
     
@@ -139,10 +179,19 @@ def get_main_movement_range(n_frames, coverage_threshold=None, window_size=None,
         angle_bin = ((flow_polar_angle[mask] % np.pi) * 90 / np.pi).astype(np.int32)
         weight = flow_polar_magnitude[mask].astype(np.float64)
         angle_bins += np.bincount(angle_bin, weights=weight, minlength=90)
+        prev = curr
 
     start_idx, end_idx, chosen_bins = select_greedy_hue_window(
         angle_bins, coverage_threshold=coverage_threshold
     )
+
+    #debug_plot_histogram(
+    #    angle_bins,
+    #    start_idx=start_idx,
+    #    end_idx=end_idx,
+    #    chosen_bins=chosen_bins,
+    #    title="Greedy Hue Window Selection"
+    #)
     
     return start_idx * np.pi / 90, end_idx * np.pi / 90, chosen_bins
 
@@ -242,50 +291,34 @@ def calculate_roi_polygon(n_frames, car_direction_range):
     """Calculate ROI polygon from video frames."""
     flow_magnitude_threshold = 2.0
     background_subtraction_threshold = 30
-    roi_time_coverage = 0.999
+    roi_time_coverage = 0.99
     roi_space_coverage = 0.99
     roi_polygon_sides = 6
-    print("Time1: " + str(time.perf_counter()))
     prev=video.get_frame()[1]
-    print("Time2: " + str(time.perf_counter()))
     meta_background = background.Background(prev.shape[1], prev.shape[0], size=n_frames)
-    print("Time3: " + str(time.perf_counter()))
     for i in range(n_frames):
-        print("Time4: " + str(time.perf_counter()))
         curr=video.get_frame()[1]
-        print("Time5: " + str(time.perf_counter()))
         optical_flow_polar = optical_flow.flow_to_polar(optical_flow.calculate_optical_flow(prev, curr, dis_preset="FAST"))
-        print("Time6: " + str(time.perf_counter()))
         flow_mask = optical_flow.flow_subtract(optical_flow_polar, car_direction_range, flow_magnitude_threshold)
-        print("Time7: " + str(time.perf_counter()))
         bg_mask = video._background.background_subtract(curr, threshold=background_subtraction_threshold, subtract_percentile=50)
-        print("Time8: " + str(time.perf_counter()))
         and_mask = cv2.bitwise_and(flow_mask, bg_mask)
-        print("Time9: " + str(time.perf_counter()))
         filled_mask = detection.fill_holes(and_mask)
-        print("Time10: " + str(time.perf_counter()))
+        #cv2.imshow("ROI Frame Mask", filled_mask)
+        #cv2.waitKey(1)
         meta_background.update(filled_mask)
-        print("Time11: " + str(time.perf_counter()))
         prev=curr
-    print("Time12: " + str(time.perf_counter()))
     bg = meta_background.get_background_percentile(roi_time_coverage * 100)
-    print("Time13: " + str(time.perf_counter()))
     roi_visual = cv2.cvtColor(bg, cv2.COLOR_GRAY2BGR)
-    print("Time14: " + str(time.perf_counter()))
     pts_roi, stats_roi, tl_roi, kicks_roi = roi_maker.fit_polygon_to_mask_optimized(bg, roi_polygon_sides, target_coverage=roi_space_coverage)
-    print("Time15: " + str(time.perf_counter()))
     polygon_points = np.array(pts_roi, dtype=np.int32)
-    print("Time16: " + str(time.perf_counter()))
     cv2.polylines(roi_visual, [polygon_points], True, (0, 255, 0), 2)
-    print("Time17: " + str(time.perf_counter()))
     cv2.imwrite("final_debug/roi_on_mask.png", roi_visual)
-    print("Time18: " + str(time.perf_counter()))
     return np.array(pts_roi, dtype=np.int32)
 
 def calibrate():
     """Calibrate camera parameters from video frames."""
-    main_movement_range_frame_number = 200
-    roi_polygon_frame_number = 200
+    main_movement_range_frame_number = 800
+    roi_polygon_frame_number = 2400
     warped_bg_window_size = 800
     get_lanes_frame_number = 800
 
