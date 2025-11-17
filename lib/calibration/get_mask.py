@@ -42,7 +42,7 @@ def get_polygon_vertices(mask_path):
 
 def main():
     # Example usage
-    mask_path = "dataset/session0_left/video_mask.png"
+    mask_path = "assets/video_mask.png"
     
     try:
         vertices = get_polygon_vertices(mask_path)
