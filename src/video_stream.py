@@ -4,6 +4,8 @@ import background
 class VideoStream:
     def __init__(self):
         self.roi_mask = None
+        self._background = None
+        self.original_fps = 50
 
     def set_config(self, video_path, frame_interval=1, colour=True, make_background=False):
         self.cap = cv2.VideoCapture(video_path)
@@ -16,6 +18,9 @@ class VideoStream:
 
     def start_background(self, window_size, W, H):
         self._background = background.Background(W, H, size=window_size)
+        
+    def set_intended_fps(self, intended_fps):
+        self.frame_interval = self.original_fps // intended_fps
 
     def get_frame(self):
         if self.make_background and self._background is None:
@@ -50,18 +55,24 @@ class VideoStream:
                                          borderValue=0)
         return (frame_count, warped_frame)
     
-    def get_frame_background_subtracted(self, threshold, subtract_percentile = 50, normalize=False, norm_percentiles=(10,90)):
-        frame_count, frame = self.get_frame()
-        if self.roi_mask is not None:
-            frame = cv2.bitwise_and(frame, mask=self.roi_mask)
-        mask = self._background.background_subtract(frame, threshold, subtract_percentile, normalize, norm_percentiles)
+    def get_frame_background_subtracted(self, threshold=14, subtract_percentile = 50, normalize=False, norm_percentiles=(10,90)):
+        frame_count, frame = self.get_frame_with_roi()
+        
+        mask = background.fill_holes(self._background.background_subtract(frame, threshold, subtract_percentile, normalize, norm_percentiles))
         bg_subtracted = cv2.bitwise_and(frame, frame, mask=mask)
         return frame_count, bg_subtracted
     
     def get_frame_with_roi(self):
         frame_count, frame = self.get_frame()
         if self.roi_mask is not None:
-            frame = cv2.bitwise_and(frame, mask=self.roi_mask)
+            frame = cv2.bitwise_and(frame, frame, mask=self.roi_mask)
         return frame_count, frame
+    
+    def get_frame_background_subtracted_yolo(self):
+        frame_count, frame = self.get_frame_with_roi()
+        
+        mask = self._background.background_subtract_yolo(frame, conf_threshold=0.8)
+        bg_subtracted = cv2.bitwise_and(frame, frame, mask=mask)
+        return frame_count, bg_subtracted
     
 video = VideoStream()

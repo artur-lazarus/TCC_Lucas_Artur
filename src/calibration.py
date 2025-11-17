@@ -1,18 +1,45 @@
-import os
+import time
 import numpy as np
 import cv2
-import sys
 import matplotlib.pyplot as plt
-
 import detection
 import optical_flow
 import vp_detector
+import estimate_scale
 from video_stream import video
 import background
-
 import homography
 import roi_maker
 import time
+
+def _compute_vp3_from_vp1_vp2(vp1_px, vp2_px, K):
+    """
+    Compute the third vanishing point (vertical) from two ground plane VPs.
+    
+    Since VP1 and VP2 are perpendicular and lie on the ground plane,
+    their cross product gives the vertical direction (VP3).
+    
+    Args:
+        vp1_px: (x, y) pixel coordinates of VP1 (road direction)
+        vp2_px: (x, y) pixel coordinates of VP2 (perpendicular to road)
+        K: 3x3 camera intrinsics matrix
+        
+    Returns:
+        (x, y) pixel coordinates of VP3 (vertical direction)
+    """
+    # Convert pixel VPs to camera directions
+    d1 = homography.pixel_vp_to_cam_dir(vp1_px, K)
+    d2 = homography.pixel_vp_to_cam_dir(vp2_px, K)
+    
+    # VP3 direction is perpendicular to both VP1 and VP2 (cross product)
+    d3 = np.cross(d1, d2)
+    d3 /= np.linalg.norm(d3)
+    
+    # Project back to image coordinates: vp = K @ d
+    vp3_h = K @ d3
+    vp3_px = (vp3_h[0] / vp3_h[2], vp3_h[1] / vp3_h[2])
+    
+    return vp3_px
 
 def select_greedy_hue_window(counts, window_size=None, coverage_threshold=None):
     """Select circular window of bins by window size or coverage threshold.
@@ -239,7 +266,7 @@ def get_lanes_y_pxs(n_frames, background_warped, min_area_for_car_detection):
         plt.figure(figsize=(6,3))
         plt.plot(smoothed_counts)
         plt.tight_layout()
-        plt.savefig("final_debug/smoothed_histogram.png", dpi=150)
+        plt.savefig("test_output/calibration_debug/smoothed_histogram.png", dpi=150)
         plt.close()
 
         # --- Peak candidates: local maxima in smoothed histogram ---
@@ -303,8 +330,6 @@ def calculate_roi_polygon(n_frames, car_direction_range):
         bg_mask = video._background.background_subtract(curr, threshold=background_subtraction_threshold, subtract_percentile=50)
         and_mask = cv2.bitwise_and(flow_mask, bg_mask)
         filled_mask = detection.fill_holes(and_mask)
-        #cv2.imshow("ROI Frame Mask", filled_mask)
-        #cv2.waitKey(1)
         meta_background.update(filled_mask)
         prev=curr
     bg = meta_background.get_background_percentile(roi_time_coverage * 100)
@@ -312,10 +337,10 @@ def calculate_roi_polygon(n_frames, car_direction_range):
     pts_roi, stats_roi, tl_roi, kicks_roi = roi_maker.fit_polygon_to_mask_optimized(bg, roi_polygon_sides, target_coverage=roi_space_coverage)
     polygon_points = np.array(pts_roi, dtype=np.int32)
     cv2.polylines(roi_visual, [polygon_points], True, (0, 255, 0), 2)
-    cv2.imwrite("final_debug/roi_on_mask.png", roi_visual)
+    cv2.imwrite("test_output/calibration_debug/roi_on_mask.png", roi_visual)
     return np.array(pts_roi, dtype=np.int32)
 
-def calibrate():
+def calibrate(show_video = False):
     """Calibrate camera parameters from video frames."""
     main_movement_range_frame_number = 800
     roi_polygon_frame_number = 2400
@@ -326,31 +351,16 @@ def calibrate():
     flow_magnitude_threshold = 2.0
     min_area_for_car_detection = 1600 #TODO: Change based on scaling later
 
-    timec0 = time.perf_counter()
-    start_angle, end_angle, chosen_bins = get_main_movement_range(
-        main_movement_range_frame_number, 
-        coverage_threshold=movement_range_coverage, 
-        magnitude_threshold=flow_magnitude_threshold)
-    timec1 = time.perf_counter()
-    print(f"Main movement range calculation time: {timec1 - timec0:.3f} seconds")
-    polygon_pts = calculate_roi_polygon(roi_polygon_frame_number, (start_angle, end_angle))
-    timec2 = time.perf_counter()
-    print(f"ROI polygon calculation time: {timec2 - timec1:.3f} seconds")
-
-    roi_area = cv2.contourArea(polygon_pts)
-    M = cv2.moments(polygon_pts)
-    cx_roi = M['m10'] / M['m00'] if M['m00'] != 0 else 0
-    cy_roi = M['m01'] / M['m00'] if M['m00'] != 0 else 0
-    with open("final_debug/roi_stats.txt", "w") as fout:
-        fout.write("ROI POLYGON STATISTICS\n")
-        fout.write("=" * 50 + "\n\n")
-        fout.write(f"Number of vertices: {len(polygon_pts)}\n")
-        fout.write(f"Area: {roi_area:.2f} px²\n")
-        fout.write(f"Centroid: ({cx_roi:.2f}, {cy_roi:.2f})\n")
-        fout.write(f"Vertices:\n")
-        for i, pt in enumerate(polygon_pts):
-            fout.write(f"  {i}: ({pt[0]}, {pt[1]})\n")
-    print("Saved: final_debug/roi_on_mask.png, final_debug/roi_stats.txt")
+    # timec0 = time.perf_counter()
+    # start_angle, end_angle, chosen_bins = get_main_movement_range(
+    #     main_movement_range_frame_number, 
+    #     coverage_threshold=movement_range_coverage, 
+    #     magnitude_threshold=flow_magnitude_threshold)
+    # timec1 = time.perf_counter()
+    # print(f"Main movement range calculation time: {timec1 - timec0:.3f} seconds")
+    # polygon_pts = calculate_roi_polygon(roi_polygon_frame_number, (start_angle, end_angle))
+    # timec2 = time.perf_counter()
+    # print(f"ROI polygon calculation time: {timec2 - timec1:.3f} seconds")
 
     # Basic intrinsics estimation
     frame=video.get_frame()[1]
@@ -358,15 +368,18 @@ def calibrate():
     cx = w // 2
     cy = h // 2
     timec3 = time.perf_counter()
-    print(f"Basic intrinsics estimation time: {timec3 - timec2:.3f} seconds")
+    # print(f"Basic intrinsics estimation time: {timec3 - timec2:.3f} seconds")
     
     # Create binary ROI mask from polygon
-    roi_mask = np.zeros((h, w), dtype=np.uint8)
-    cv2.fillPoly(roi_mask, [polygon_pts], 255)
-    video.set_roi_mask(roi_mask)
+    # roi_mask = np.zeros((h, w), dtype=np.uint8)
+    # cv2.fillPoly(roi_mask, [polygon_pts], 255)
+    # video.set_roi_mask(roi_mask)
+    
+    video.set_roi_mask(cv2.imread("assets/video_mask.png", cv2.IMREAD_GRAYSCALE))
+    polygon_pts = [[1711,  125], [1180,   88], [ 168,  807], [1321, 1075]]
 
     # VP calculation
-
+    road_vp, perpendicular_vp = vp_detector.detect_road_and_cross_vps(show_video=True)
 
     # Homography calculation
     f = homography.f_from_two_orthogonal_vps(road_vp, perpendicular_vp, cx, cy)
@@ -376,13 +389,17 @@ def calibrate():
         [   0.0,   0.0,   1.0]
     ], dtype=np.float64)
 
-    r1, r2, r3 = homography.get_rotation_matrix_from_vps(perpendicular_vp, road_vp, K_matrix)
+    r1, r2, r3 = homography.get_rotation_matrix_from_vps(road_vp, perpendicular_vp, K_matrix)
     H_matrix, (W_out, H_out) = homography.build_img_to_bird_homography(
         frame.shape, K_matrix, r1, r2, scale=None, margin=0.01, roi_polygon=polygon_pts, target_width_px=1280.0
     )
     video.set_warping_configs(H_matrix, W_out, H_out)
+    
+    vertical_vp = _compute_vp3_from_vp1_vp2(road_vp, perpendicular_vp, K_matrix)
 
     # Scale calculation
+    scale_lambda = estimate_scale.estimate_scale(road_vp, perpendicular_vp, vertical_vp, show_video)
+    
     background_warped = background.Background(W_out, H_out, warped_bg_window_size)
     for _ in range(warped_bg_window_size):
         frame_warped = video.get_frame_warped()[1]
@@ -391,13 +408,13 @@ def calibrate():
     lanes_y_pxs = get_lanes_y_pxs(get_lanes_frame_number, background_warped, min_area_for_car_detection)
 
 
-    with open("final_debug/calibration_info.txt", "w") as fout:
+    with open("test_output/calibration_debug/calibration_info.txt", "w") as fout:
         fout.write("CALIBRATION PARAMETERS\n")
         fout.write("=" * 50 + "\n\n")
         fout.write(f"Vanishing Points:\n")
-        fout.write(f"  Road VP: ({vp_road[0]:.2f}, {vp_road[1]:.2f})\n")
-        fout.write(f"  Parallel VP: ({vp_vertical[0]:.2f}, {vp_vertical[1]:.2f})\n\n")
-        fout.write(f"Focal Length: {focal_length:.2f} px\n\n")
+        fout.write(f"  Road VP: ({road_vp[0]:.2f}, {road_vp[1]:.2f})\n")
+        fout.write(f"  Parallel VP: ({perpendicular_vp[0]:.2f}, {perpendicular_vp[1]:.2f})\n\n")
+        fout.write(f"Focal Length: {f:.2f} px\n\n")
         fout.write(f"K Matrix:\n{K_matrix}\n\n")
         fout.write(f"Rotation Vectors:\n")
         fout.write(f"  r1 (road): {r1}\n")
@@ -407,13 +424,13 @@ def calibrate():
         fout.write(f"Output size: {W_out} x {H_out}\n")
         fout.write(f"ROI polygon: {polygon_pts.tolist()}\n")
         fout.write(f"Lane Y-pixels: {lanes_y_pxs}\n")
-    print("Saved: final_debug/calibration_info.txt")
+    print("Saved: test_output/calibration_debug/calibration_info.txt")
 
     roi_area = cv2.contourArea(polygon_pts)
     M = cv2.moments(polygon_pts)
     cx_roi = M['m10'] / M['m00'] if M['m00'] != 0 else 0
     cy_roi = M['m01'] / M['m00'] if M['m00'] != 0 else 0
-    with open("final_debug/roi_stats.txt", "w") as fout:
+    with open("test_output/calibration_debug/roi_stats.txt", "w") as fout:
         fout.write("ROI POLYGON STATISTICS\n")
         fout.write("=" * 50 + "\n\n")
         fout.write(f"Number of vertices: {len(polygon_pts)}\n")
@@ -422,10 +439,40 @@ def calibrate():
         fout.write(f"Vertices:\n")
         for i, pt in enumerate(polygon_pts):
             fout.write(f"  {i}: ({pt[0]}, {pt[1]})\n")
-    print("Saved: final_debug/roi_on_mask.png, final_debug/roi_stats.txt")
+    print("Saved: test_output/calibration_debug/roi_on_mask.png, test_output/calibration_debug/roi_stats.txt")
 
     warped_example = video.get_frame_warped()[1]
-    cv2.imwrite("final_debug/warped_example.png", warped_example)
-    print("Saved: final_debug/warped_example.png")
+    cv2.imwrite("test_output/calibration_debug/warped_example.png", warped_example)
+    print("Saved: test_output/calibration_debug/warped_example.png")
 
-    return H_matrix, polygon_pts, H_out, W_out, lanes_y_pxs, background_warped._background, final_road_vp1, final_vertical_vp1, K_matrix, r1, r2, r3, f
+    return H_matrix, polygon_pts, H_out, W_out, lanes_y_pxs, background_warped._background, road_vp, perpendicular_vp, K_matrix, r1, r2, r3, f, scale_lambda
+
+if __name__ == "__main__":
+    time0 = time.perf_counter()
+    input_video_path = "assets/video.avi"
+    colour = False
+    original_fps = 50
+    target_fps = 10
+    frame_interval = original_fps // target_fps
+    video_background_window_size = 800
+    video_resolution = (1920, 1080)  # (W, H)
+
+    time1 = time.perf_counter()
+    print(f"Setup time: {time1 - time0:.3f} seconds")
+
+    video.set_config(input_video_path, frame_interval=frame_interval, colour=colour, make_background=True)
+    video.start_background(window_size=video_background_window_size, W=video_resolution[0], H=video_resolution[1])
+    time2 = time.perf_counter()
+    print(f"Video instantiation time: {time2 - time1:.3f} seconds")
+
+    # Background population
+    last_time = time2
+    for _ in range(video_background_window_size):
+        if _ % 50 == 0:
+            print(f"Background population: {_}/{video_background_window_size} - {time.perf_counter() - last_time:.3f}sec")
+            last_time = time.perf_counter()
+        video.get_frame()
+    time3 = time.perf_counter()
+    print(f"Initial background population time: {time3 - time2:.3f} seconds")
+    
+    calibrate(True)

@@ -1,6 +1,7 @@
 import numpy as np
 import cv2
 import time
+from ultralytics import YOLO
 
 # Optional acceleration with numba
 try:
@@ -100,7 +101,7 @@ class Background:
             self.ring_head = (self.ring_head + 1) % self.size
             self.loaded += 1
 
-            #print("Background update (warm-up) took: " + str(time.perf_counter() - time0))
+            # print("Background update (warm-up) took: " + str(time.perf_counter() - time0))
             return
 
         # STEADY STATE: sliding window remove + add
@@ -116,7 +117,7 @@ class Background:
         self.ring_head = (self.ring_head + 1) % self.size
         self.updated_since_last_median = True
 
-        #print("Background update (steady) took: " + str(time.perf_counter() - time0))
+        # print("Background update (steady) took: " + str(time.perf_counter() - time0))
 
     # ---------------------------------------------------------
     def _compute_background_percentile_image(self, percentile: float) -> np.ndarray:
@@ -163,7 +164,7 @@ class Background:
         self.last_bg_computed = bg_img.astype(np.uint8)
         self.last_bg_computed_percentile = percentile
         self.updated_since_last_median = False
-        #print("Background percentile computation took: " + str(time.perf_counter() - time0))
+        # print("Background percentile computation took: " + str(time.perf_counter() - time0))
         return self.last_bg_computed
 
     # ---------------------------------------------------------
@@ -200,3 +201,72 @@ class Background:
         _, mask = cv2.threshold(diff, threshold, 255, cv2.THRESH_BINARY)
         mask = cv2.medianBlur(mask, 5)
         return mask
+    
+    def background_subtract_yolo(self, frame, conf_threshold=0.8):
+        # Vehicle classes in COCO: car (2), motorcycle (3), bus (5), truck (7)
+        vehicle_classes = [2]
+        model_path = "resources/yolov8l-seg.pt"
+        
+        model = YOLO(model_path)
+        iou_threshold=0.7
+        
+        # Run YOLOv8 segmentation
+        results = model.predict(
+            frame,
+            conf=conf_threshold,
+            iou=iou_threshold,
+            classes=vehicle_classes,
+            verbose=False
+        )
+        
+        # Create blank mask
+        h, w = frame.shape[:2]
+        mask = np.zeros((h, w), dtype=np.uint8)
+        
+        # Extract segmentation masks and bounding boxes from results
+        if results and len(results) > 0:
+            result = results[0]
+            if result.masks is not None and result.boxes is not None:
+                # Get the segmentation masks and bounding boxes
+                masks_data = result.masks.data.cpu().numpy()
+                boxes = result.boxes.xyxy.cpu().numpy()
+                
+                # Process each detected object
+                for mask_data, box in zip(masks_data, boxes):
+                    # Resize mask to frame size if needed
+                    if mask_data.shape != (h, w):
+                        mask_resized = cv2.resize(
+                            mask_data, (w, h), 
+                            interpolation=cv2.INTER_LINEAR
+                        )
+                    else:
+                        mask_resized = mask_data
+                    
+                    # Threshold to get binary mask
+                    binary_mask = (mask_resized > 0.5).astype(np.uint8) * 255
+                    
+                    # Crop mask to bounding box
+                    x1, y1, x2, y2 = box.astype(int)
+                    # Clamp box coordinates to frame bounds
+                    x1, y1 = max(0, x1), max(0, y1)
+                    x2, y2 = min(w, x2), min(h, y2)
+                    
+                    # Create bounding box mask
+                    bbox_mask = np.zeros((h, w), dtype=np.uint8)
+                    bbox_mask[y1:y2, x1:x2] = 255
+                    
+                    # Apply bounding box crop to segmentation
+                    cropped_mask = cv2.bitwise_and(binary_mask, bbox_mask)
+                    
+                    # Add to combined mask
+                    mask = cv2.bitwise_or(mask, cropped_mask)
+        
+        return mask
+
+def fill_holes(mask):
+        h, w = mask.shape
+        flood_mask = np.zeros((h + 2, w + 2), np.uint8)
+        im_flood = mask.copy()
+        cv2.floodFill(im_flood, flood_mask, (0, 0), 255)
+        im_flood_inv = cv2.bitwise_not(im_flood)
+        return cv2.bitwise_or(mask, im_flood_inv)
