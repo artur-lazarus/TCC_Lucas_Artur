@@ -29,22 +29,16 @@ def calculate_optical_flow_multiple(
 
 def calculate_optical_flow(first_frame, second_frame, dis_preset="FAST"):
     """Compute dense optical flow between two frames using OpenCV DISOpticalFlow."""
-    print("Time2: " + str(time.perf_counter()))
     preset_map = {
         "ULTRAFAST": cv2.DISOPTICAL_FLOW_PRESET_ULTRAFAST,
         "FAST": cv2.DISOPTICAL_FLOW_PRESET_FAST,
         "MEDIUM": cv2.DISOPTICAL_FLOW_PRESET_MEDIUM,
     }
-    print("Time3: " + str(time.perf_counter()))
 
     preset_cv = preset_map.get(dis_preset.upper(), cv2.DISOPTICAL_FLOW_PRESET_FAST)
-    print("Time4: " + str(time.perf_counter()))
     dis = cv2.DISOpticalFlow_create(preset_cv)
-    print("Time5: " + str(time.perf_counter()))
 
     flow = dis.calc(first_frame, second_frame, None)
-    print("Time6: " + str(time.perf_counter()))
-    print("Time7: " + str(time.perf_counter()))
     return flow
 
 def flow_to_polar(flow):

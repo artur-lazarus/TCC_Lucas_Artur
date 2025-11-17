@@ -5,6 +5,32 @@ from typing import List, Tuple, Optional
 
 Point = Tuple[float, float]
 
+def kalman_smoother(xs: List[np.ndarray], Ps: List[np.ndarray], F: np.ndarray, Q: np.ndarray):
+    """
+    Rauch–Tung–Striebel (RTS) smoother.
+    Given a sequence of filtered states (xs, Ps),
+    computes smoothed estimates using all data up to the final frame.
+
+    Returns:
+        xs_smooth (List[np.ndarray])
+        Ps_smooth (List[np.ndarray])
+    """
+    N = len(xs)
+    if N == 0:
+        return [], []
+    xs_smooth = [xs[-1].copy()]
+    Ps_smooth = [Ps[-1].copy()]
+
+    for k in range(N - 2, -1, -1):
+        P_pred = F @ Ps[k] @ F.T + Q
+        G = Ps[k] @ F.T @ np.linalg.inv(P_pred)
+        x_s = xs[k] + G @ (xs_smooth[0] - F @ xs[k])
+        P_s = Ps[k] + G @ (Ps_smooth[0] - P_pred) @ G.T
+        xs_smooth.insert(0, x_s)
+        Ps_smooth.insert(0, P_s)
+
+    return xs_smooth, Ps_smooth
+
 def _motion_matrices(dt: float):
     # State: [x, y, vx, vy]
     F = np.array([
@@ -52,6 +78,8 @@ class Track:
     time_since_update: int = 0
     age: int = 0
     history: list = field(default_factory=list)
+    filtered_states: list = field(default_factory=list)
+    filtered_covs: list = field(default_factory=list)
 
     @staticmethod
     def from_detection(pt: Point, dt: float, sigma_a: float, sigma_z: float) -> "Track":
@@ -72,6 +100,8 @@ class Track:
     def predict(self):
         self.x = self.F @ self.x
         self.P = self.F @ self.P @ self.F.T + self.Q
+        self.filtered_states.append(self.x.copy())
+        self.filtered_covs.append(self.P.copy())
         self.age += 1
         self.time_since_update += 1
         # Store latest predicted position for visualization/debug
@@ -87,6 +117,8 @@ class Track:
         self.P = (I - K @ self.H) @ self.P
         self.hits += 1
         self.time_since_update = 0
+        self.filtered_states.append(self.x.copy())
+        self.filtered_covs.append(self.P.copy())
 
     def position(self) -> Point:
         return float(self.x[0, 0]), float(self.x[1, 0])
@@ -144,6 +176,8 @@ class Tracker:
         self.min_hits = int(min_hits)
         self._tracks: List[Track] = []
         self._newborns: List[Point] = []
+        self._finished_tracks: List[Track] = []
+        
 
     @staticmethod
     def bboxes_to_points(bboxes: List[Tuple[float, float, float, float]]) -> List[Point]:
@@ -239,6 +273,8 @@ class Tracker:
             if idx in unmatched_tracks:
                 if t.time_since_update <= self.max_age:
                     survivors.append(t)
+                else:
+                    self._finished_tracks.append(t)  # save before deleting
             else:
                 survivors.append(t)
         self._tracks = survivors
@@ -261,5 +297,22 @@ class Tracker:
             if t.time_since_update <= self.max_age:
                 out.append((t.id, t.position(), t.velocity()))
         return out
+    
+    def get_average_velocity_per_track(self) -> List[Tuple[int, float]]:
+        """
+        Run RTS smoothing for each (active or finished) track and return (track_id, avg_speed).
+        """
+        results = []
+        all_tracks = self._tracks + self._finished_tracks
+        for t in all_tracks:
+            if len(t.filtered_states) < 3:
+                continue
+            xs_s, _ = kalman_smoother(t.filtered_states, t.filtered_covs, t.F, t.Q)
+            v = [np.hypot(x[2,0], x[3,0]) for x in xs_s]
+            avg_v = float(np.mean(v))
+            results.append((t.id,len(t.filtered_states), avg_v))
+        return results
+    
+
     
 

@@ -251,7 +251,7 @@ def calculate_roi_polygon(n_frames, car_direction_range):
         curr=video.get_frame()[1]
         optical_flow_polar = optical_flow.flow_to_polar(optical_flow.calculate_optical_flow(prev, curr, dis_preset="FAST"))
         flow_mask = optical_flow.flow_subtract(optical_flow_polar, car_direction_range, flow_magnitude_threshold)
-        bg_mask = video.background_subtract(curr, threshold=background_subtraction_threshold, subtract_percentile=50)
+        bg_mask = video._background.background_subtract(curr, threshold=background_subtraction_threshold, subtract_percentile=50)
         and_mask = cv2.bitwise_and(flow_mask, bg_mask)
         filled_mask = detection.fill_holes(and_mask)
         meta_background.update(filled_mask)
@@ -283,7 +283,7 @@ def calibrate():
         magnitude_threshold=flow_magnitude_threshold)
     timec1 = time.perf_counter()
     print(f"Main movement range calculation time: {timec1 - timec0:.3f} seconds")
-    polygon_pts = calculate_roi_polygon(roi_polygon_frame_number, start_angle, end_angle)
+    polygon_pts = calculate_roi_polygon(roi_polygon_frame_number, (start_angle, end_angle))
     timec2 = time.perf_counter()
     print(f"ROI polygon calculation time: {timec2 - timec1:.3f} seconds")
 
