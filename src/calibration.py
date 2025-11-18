@@ -185,13 +185,13 @@ def get_main_movement_range(n_frames, coverage_threshold=None, window_size=None,
         angle_bins, coverage_threshold=coverage_threshold
     )
 
-    #debug_plot_histogram(
-    #    angle_bins,
-    #    start_idx=start_idx,
-    #    end_idx=end_idx,
-    #    chosen_bins=chosen_bins,
-    #    title="Greedy Hue Window Selection"
-    #)
+    debug_plot_histogram(
+        angle_bins,
+        start_idx=start_idx,
+        end_idx=end_idx,
+        chosen_bins=chosen_bins,
+        title="Greedy Hue Window Selection"
+    )
     
     return start_idx * np.pi / 90, end_idx * np.pi / 90, chosen_bins
 
@@ -322,7 +322,7 @@ def calibrate():
     warped_bg_window_size = 800
     get_lanes_frame_number = 800
 
-    movement_range_coverage = 0.9
+    movement_range_coverage = 0.8
     flow_magnitude_threshold = 2.0
     min_area_for_car_detection = 1600 #TODO: Change based on scaling later
 
@@ -331,6 +331,8 @@ def calibrate():
         main_movement_range_frame_number, 
         coverage_threshold=movement_range_coverage, 
         magnitude_threshold=flow_magnitude_threshold)
+
+
     timec1 = time.perf_counter()
     print(f"Main movement range calculation time: {timec1 - timec0:.3f} seconds")
     polygon_pts = calculate_roi_polygon(roi_polygon_frame_number, (start_angle, end_angle))
