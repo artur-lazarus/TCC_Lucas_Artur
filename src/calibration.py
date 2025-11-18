@@ -473,7 +473,7 @@ if __name__ == "__main__":
     original_fps = 50
     target_fps = 10
     frame_interval = original_fps // target_fps
-    video_background_window_size = 800
+    video_background_window_size = 100
     video_resolution = (1920, 1080)  # (W, H)
 
     time1 = time.perf_counter()
