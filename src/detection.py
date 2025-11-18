@@ -7,7 +7,7 @@ import background
 
 class Detection:
     def __init__(self):
-        self._background = None
+        self._background: background.Background = None
 
     def insert_calibration(self, H_matrix, roi_polygon, H_out, W_out, lanes_y_pxs, scale_lambda, fps):
         self.H_matrix = H_matrix
@@ -46,13 +46,16 @@ class Detection:
         for lane_y in self.lanes_y_pxs:
             cv2.line(calibrated_frame, (0, lane_y), (self.W_out, lane_y), (0), 1)
         
-        calibrated_frame_mask = self.fill_holes(self.background_subtract(calibrated_frame, threshold=16, normalize=True))
+        calibrated_frame_mask = fill_holes(self._background.background_subtract(calibrated_frame, threshold=16, normalize=True))
         output_image, bboxes, areas = detect_blobs(calibrated_frame_mask, min_area=min_car_area, draw_boxes=True)
         BL_corners = [(bbox[0], bbox[1]+bbox[3]) for bbox in bboxes] # (x, y+h)
 
         self.tracker.update(BL_corners, frame_count)
 
         if visualize:
+            cv2.imshow('Calibrated Frame Mask', calibrated_frame_mask)
+            cv2.waitKey(1)  # Non-blocking wait to update the display
+        
             frame_vis = cv2.cvtColor(calibrated_frame, cv2.COLOR_GRAY2BGR)
             for (x, y, w, h) in bboxes:
                 p = (int(x), int(y + h))
@@ -66,8 +69,11 @@ def _draw_track_trail(frame, track, max_len=25):
     """Draw a short trail of a track's recent positions."""
     pts = track.history[-max_len:]
     for a, b in zip(pts[:-1], pts[1:]):
-        a = tuple(map(int, a))
-        b = tuple(map(int, b))
+        # Extract position (index 1) from history entry [frame_count, (x, y), vel_x]
+        a_pos = a[1]  # (x, y) tuple
+        b_pos = b[1]  # (x, y) tuple
+        a = tuple(map(int, a_pos))
+        b = tuple(map(int, b_pos))
         cv2.line(frame, a, b, (255, 255, 255), 2, cv2.LINE_AA)
 
 def _draw_tracks(frame, tracker):
@@ -133,5 +139,3 @@ def detect_blobs_multiple(masks, min_area, max_area=None, draw_boxes=True):
             all_bboxes.append(valid_bboxes)
             all_areas.append(valid_areas)
         return output_images, all_bboxes, all_areas
-    
-    

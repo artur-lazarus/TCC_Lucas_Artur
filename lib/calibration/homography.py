@@ -279,9 +279,9 @@ def main():
 
     # TODO: your detected vanishing points in pixel coords
     # VP in the road direction (forward)
-    vp_side_px = (-2822.459, 41.307095)
+    vp_side_px = (-2408.5, 104.96)
     # VP in the perpendicular direction (side/across road)
-    vp_forward_px = (1984.2766, -507.85928)
+    vp_forward_px = (1958.1123, -476.17346)
 
     f=f_from_two_orthogonal_vps(vp_forward_px, vp_side_px, 960.0, 540.0)
     K = np.array([

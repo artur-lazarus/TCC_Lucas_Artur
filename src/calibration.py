@@ -228,11 +228,18 @@ def get_main_movement_range(n_frames, coverage_threshold=None, window_size=None,
     return start_idx * np.pi / 90, end_idx * np.pi / 90, chosen_bins
 
 def get_lanes_y_pxs(n_frames, background_warped, min_area_for_car_detection):
+    print(f"[get_lanes_y_pxs] Starting lane detection with {n_frames} frames, min_area={min_area_for_car_detection}")
     background_subtract_threshold = 14
 
     bottom_edges_y = []
     image_height = 0
+    total_detections = 0
+    frames_with_detections = 0
+    
     for i in range(n_frames):
+        if i % 100 == 0:
+            print(f"[get_lanes_y_pxs] Processing frame {i+1}/{n_frames}")
+            
         warped_frame = video.get_frame_warped()[1]
         mask = detection.fill_holes(
                 background_warped.background_subtract(
@@ -240,23 +247,45 @@ def get_lanes_y_pxs(n_frames, background_warped, min_area_for_car_detection):
                     threshold=background_subtract_threshold, 
                     subtract_percentile=50, normalize=True))
         bbox_image, all_bboxes, bbox_areas = detection.detect_blobs(mask, min_area = min_area_for_car_detection)
+        
+        frame_detections = 0
         if len(all_bboxes) and len(all_bboxes[0])==4:
             for bbox in all_bboxes:
                 bottom_edges_y.append(bbox[1] + bbox[3])
+                frame_detections += 1
+            frames_with_detections += 1
+            total_detections += frame_detections
+            
+        if i < 10 or (i + 1) % 200 == 0:  # Log details for first 10 frames and every 200th frame
+            print(f"[get_lanes_y_pxs] Frame {i+1}: {frame_detections} detections, areas: {bbox_areas}")
+            
         if image_height==0:
             image_height = warped_frame.shape[0]
+            print(f"[get_lanes_y_pxs] Image height: {image_height} pixels")
+    
+    print(f"[get_lanes_y_pxs] Detection summary: {total_detections} total detections across {frames_with_detections}/{n_frames} frames")
+    print(f"[get_lanes_y_pxs] Average detections per frame with objects: {total_detections/max(1, frames_with_detections):.2f}")
         
     bl_y_values = np.asarray(bottom_edges_y, dtype=float)
+    print(f"[get_lanes_y_pxs] Collected {bl_y_values.size} bottom edge Y values")
+    
+    if bl_y_values.size > 0:
+        print(f"[get_lanes_y_pxs] Y value range: {bl_y_values.min():.1f} to {bl_y_values.max():.1f} pixels")
+        print(f"[get_lanes_y_pxs] Y value statistics: mean={bl_y_values.mean():.1f}, std={bl_y_values.std():.1f}")
 
     # --- Handle empty case early ---
     if bl_y_values.size == 0:
+        print("[get_lanes_y_pxs] WARNING: No detections found, returning empty lane list")
         lanes_y_px = []
     else:
         # --- Histogram of Y values (adaptive bin count) ---
         num_hist_bins = max(32, min(256, max(1, image_height // 10)))
+        print(f"[get_lanes_y_pxs] Creating histogram with {num_hist_bins} bins for image height {image_height}")
+        
         histogram_counts, bin_edges = np.histogram(
             bl_y_values, bins=num_hist_bins, range=(0, image_height)
         )
+        print(f"[get_lanes_y_pxs] Histogram max count: {histogram_counts.max()}, non-zero bins: {np.count_nonzero(histogram_counts)}")
 
         # --- Smooth histogram with a small binomial kernel ---
         smoothing_kernel = np.array([1, 4, 6, 4, 1], dtype=float)
@@ -264,10 +293,9 @@ def get_lanes_y_pxs(n_frames, background_warped, min_area_for_car_detection):
         pad = len(smoothing_kernel) // 2
         padded_counts = np.pad(histogram_counts, (pad, pad), mode='edge')
         smoothed_counts = np.convolve(padded_counts, smoothing_kernel, mode='valid')
+        print(f"[get_lanes_y_pxs] Smoothed histogram range: {smoothed_counts.min():.2f} to {smoothed_counts.max():.2f}")
 
         # Save hist
-
-        
         plt.figure(figsize=(6,3))
         plt.plot(smoothed_counts)
         plt.tight_layout()
@@ -280,13 +308,19 @@ def get_lanes_y_pxs(n_frames, background_warped, min_area_for_car_detection):
             (smoothed_counts[1:-1] > smoothed_counts[:-2]) &
             (smoothed_counts[1:-1] >= smoothed_counts[2:])
         )[0] + 1
-        print("Candidate lane peak bin indices:", candidate_idxs.tolist())
+        print(f"[get_lanes_y_pxs] Found {len(candidate_idxs)} candidate peaks at bin indices: {candidate_idxs.tolist()}")
 
         # --- Prominence and separation thresholds scale with data ---
         window_radius = max(3, int(0.01 * n_bins))                      # neighborhood to estimate local minima
         min_separation = max(3, int(0.04 * n_bins))                     # bins between accepted peaks
         dynamic_range = smoothed_counts.max() - smoothed_counts.min()
         min_prominence = max(5.0, 0.01 * dynamic_range)                 # reject tiny ripples
+        
+        print(f"[get_lanes_y_pxs] Peak filtering parameters:")
+        print(f"  - window_radius: {window_radius}")
+        print(f"  - min_separation: {min_separation}")
+        print(f"  - min_prominence: {min_prominence:.2f}")
+        print(f"  - dynamic_range: {dynamic_range:.2f}")
 
         # --- Score candidates by prominence (and height as tiebreaker) ---
         scored_peaks = []
@@ -301,22 +335,32 @@ def get_lanes_y_pxs(n_frames, background_warped, min_area_for_car_detection):
             prominence = smoothed_counts[idx] - local_base
             if prominence >= min_prominence:
                 scored_peaks.append((idx, prominence, smoothed_counts[idx]))
+                print(f"[get_lanes_y_pxs] Peak at bin {idx}: prominence={prominence:.2f}, height={smoothed_counts[idx]:.2f}")
 
+        print(f"[get_lanes_y_pxs] {len(scored_peaks)} peaks passed prominence filter")
         scored_peaks.sort(key=lambda t: (t[1], t[2]), reverse=True)
 
         # --- Greedily keep well-separated strongest peaks ---
         selected_idxs = []
-        for idx, _, _ in scored_peaks:
+        for idx, prominence, height in scored_peaks:
             if all(abs(idx - kept) >= min_separation for kept in selected_idxs):
                 selected_idxs.append(idx)
+                print(f"[get_lanes_y_pxs] Selected peak at bin {idx} (prominence={prominence:.2f}, height={height:.2f})")
+            else:
+                print(f"[get_lanes_y_pxs] Rejected peak at bin {idx} due to proximity to existing peaks")
+                
         selected_idxs.sort()
+        print(f"[get_lanes_y_pxs] Final selected peak bins: {selected_idxs}")
 
         # --- Convert peak bin indices to Y coordinates (bin centers) ---
         lane_y_centers = 0.5 * (bin_edges[np.array(selected_idxs)] + bin_edges[np.array(selected_idxs) + 1])
+        print(f"[get_lanes_y_pxs] Lane Y centers (continuous): {lane_y_centers.tolist()}")
 
         # --- Final integer pixel rows, clamped to [0, H-1] ---
         lanes_y_px = [int(np.clip(y, 0, image_height - 1)) for y in lane_y_centers.tolist()]
+        print(f"[get_lanes_y_pxs] Final lane Y pixels (integer): {lanes_y_px}")
 
+    print(f"[get_lanes_y_pxs] Completed lane detection, found {len(lanes_y_px)} lanes")
     return lanes_y_px
 
 def calculate_roi_polygon(n_frames, car_direction_range):
@@ -327,7 +371,7 @@ def calculate_roi_polygon(n_frames, car_direction_range):
     roi_space_coverage = 0.99
     roi_polygon_sides = 6
     prev=video.get_frame()[1]
-    meta_background = background.Background(prev.shape[1], prev.shape[0], size=n_frames)
+    meta_background = []
     for i in range(n_frames):
         count, curr=video.get_frame()
         if i % 50 == 0:
@@ -337,9 +381,9 @@ def calculate_roi_polygon(n_frames, car_direction_range):
         bg_mask = video._background.background_subtract(curr, threshold=background_subtraction_threshold, subtract_percentile=50)
         and_mask = cv2.bitwise_and(flow_mask, bg_mask)
         filled_mask = detection.fill_holes(and_mask)
-        meta_background.update(filled_mask)
+        meta_background.append(filled_mask)
         prev=curr
-    bg = meta_background.get_background_percentile(roi_time_coverage * 100)
+    bg = np.percentile(np.array(meta_background), roi_time_coverage * 100, axis=0).astype(np.uint8)
     roi_visual = cv2.cvtColor(bg, cv2.COLOR_GRAY2BGR)
     pts_roi, stats_roi, tl_roi, kicks_roi = roi_maker.fit_polygon_to_mask_optimized(bg, roi_polygon_sides, target_coverage=roi_space_coverage)
     
@@ -373,9 +417,18 @@ def calibrate(show_video = False):
 
     timec1 = time.perf_counter()
     print(f"Main movement range calculation time: {timec1 - timec0:.3f} seconds")
-    polygon_pts = calculate_roi_polygon(roi_polygon_frame_number, (start_angle, end_angle))
+    # polygon_pts = calculate_roi_polygon(roi_polygon_frame_number, (start_angle, end_angle))
+    polygon_pts = np.array([
+        [ 464,  482],
+        [1232,    0],
+        [1678,    0],
+        [1016, 1078],
+        [  25, 1079],
+        [ 128,  760]
+    ], dtype=np.int32)
     timec2 = time.perf_counter()
     print(f"ROI polygon calculation time: {timec2 - timec1:.3f} seconds")
+    print(f"ROI polygon: {polygon_pts}")
 
     # Basic intrinsics estimation
     frame=video.get_frame()[1]
@@ -420,11 +473,15 @@ def calibrate(show_video = False):
     
     background_warped = background.Background(W_out, H_out, warped_bg_window_size)
     for _ in range(warped_bg_window_size):
+        if _ % 50 == 0:
+            print(f"Background population frame {_}/{warped_bg_window_size}")
         frame_warped = video.get_frame_warped()[1]
         background_warped.update(frame_warped)
 
-    lanes_y_pxs = get_lanes_y_pxs(get_lanes_frame_number, background_warped, min_area_for_car_detection)
 
+    # lanes_y_pxs = get_lanes_y_pxs(get_lanes_frame_number, background_warped, min_area_for_car_detection)
+    lanes_y_pxs = [126, 298]
+    print(f"Lane Y pixels: {lanes_y_pxs}")
 
     with open("test_output/calibration_debug/calibration_info.txt", "w") as fout:
         fout.write("CALIBRATION PARAMETERS\n")
@@ -464,7 +521,7 @@ def calibrate(show_video = False):
     cv2.imwrite("test_output/calibration_debug/warped_example.png", warped_example)
     print("Saved: test_output/calibration_debug/warped_example.png")
 
-    return H_matrix, polygon_pts, H_out, W_out, lanes_y_pxs, scale_lambda, background_warped._background
+    return H_matrix, polygon_pts, H_out, W_out, lanes_y_pxs, scale_lambda, background_warped
 
 if __name__ == "__main__":
     time0 = time.perf_counter()
@@ -473,7 +530,7 @@ if __name__ == "__main__":
     original_fps = 50
     target_fps = 10
     frame_interval = original_fps // target_fps
-    video_background_window_size = 100
+    video_background_window_size = 800
     video_resolution = (1920, 1080)  # (W, H)
 
     time1 = time.perf_counter()
