@@ -11,33 +11,45 @@ def pixel_vp_to_cam_dir(vp_px, K):
         raise ValueError("Vanishing point produced near-zero direction.")
     return d / n
 
-def get_rotation_matrix_from_vps(vertical_vp_px, road_vp_px, K):
-    """Return r1 (along road), r2 (across road), r3 (up)."""
-    v = -pixel_vp_to_cam_dir(vertical_vp_px, K)
-    x = pixel_vp_to_cam_dir(road_vp_px, K)
+def get_rotation_matrix_from_vps(vp_forward_px, vp_side_px, K):
+    """
+    Build camera axes:
+      r1 = forward (road direction)
+      r2 = side (across road)
+      r3 = up    (vertical)
+    """
+    # Convert VPs to directions
+    f = pixel_vp_to_cam_dir(vp_forward_px, K)
+    s = pixel_vp_to_cam_dir(vp_side_px, K)
 
-    # r3 = vertical (unit)
-    r3 = v / np.linalg.norm(v)
+    # Normalize
+    f /= np.linalg.norm(f)
+    s /= np.linalg.norm(s)
 
-    # r1 = road direction, orthogonalized wrt r3
-    r1 = x - np.dot(x, r3) * r3
-    n1 = np.linalg.norm(r1)
-    if n1 < 1e-12:
-        raise ValueError("road_vp is nearly collinear with vertical_vp.")
-    r1 /= n1
+    # r3 = vertical = f × s
+    r3 = np.cross(f, s)
+    n3 = np.linalg.norm(r3)
+    if n3 < 1e-12:
+        raise ValueError("The two VPs are nearly collinear.")
+    r3 /= n3
 
-    # r2 = r3 × r1 (right-handed basis)
+    # Re-orthogonalize r1 against r3
+    r1 = f - np.dot(f, r3) * r3
+    r1 /= np.linalg.norm(r1)
+
+    # r2 from right-handed cross
     r2 = np.cross(r3, r1)
     r2 /= np.linalg.norm(r2)
 
-    # Orthonormalize + enforce det(R)=+1
+    # Enforce orthonormality via SVD
     R = np.column_stack([r1, r2, r3])
     U, _, Vt = np.linalg.svd(R)
     R = U @ Vt
+
     if np.linalg.det(R) < 0:
         R[:, 1] *= -1
-    r1, r2, r3 = R[:,0], R[:,1], R[:,2]
-    return r1, r2, r3
+
+    return R[:,0], R[:,1], R[:,2]
 
 def build_img_to_bird_homography(img_shape, K, r1, r2, scale=None, margin=0.02, roi_polygon=None, target_width_px=1280.0):
     """

@@ -105,7 +105,6 @@ def hue_range_mask(hsv_flows, hue_min, hue_max, value_min=20):
 
 if __name__ == "__main__":
     import video_stream
-    import time
 
     test_video = video_stream.VideoStream()
     test_video.set_config("dataset/session0_left/video.avi", frame_interval=1, colour=False)

@@ -35,7 +35,7 @@ DETECT_PLATE_DIR = os.path.abspath(os.path.join(THIS_DIR, "..", "..", "detect_pl
 if DETECT_PLATE_DIR not in sys.path:
     sys.path.insert(0, DETECT_PLATE_DIR)
 
-from detect_plate import PlateDetector
+from detect_plate_slow import PlateDetector
 
 # --- Import DiamondSpace and Matplotlib ---
 try:
@@ -552,7 +552,7 @@ def estimate_vanishing_point_v(detection_obj, fg_masks, vp_u, mask_path=None,
         
         # --- Detect lines with Hough ---
         wireframe, raw_lines = find_lines_with_hough(gray_frame, final_mask, gradient_threshold=50)
-        
+            
         # --- Apply Filter 1: VP-u angle filter ---
         vp_filtered_lines = filter_lines_by_vp(raw_lines, vp_u, angle_threshold_deg=45)
         
@@ -663,7 +663,7 @@ if __name__ == "__main__":
     
     # Frame range parameters
     skip_frames = 0  # Number of frames to skip at the beginning
-    frame_limit = 500  # Number of frames to process after skipping
+    frame_limit = 5000  # Number of frames to process after skipping
     
     show_video_realtime = True
     # Set to a frame number to analyze *only* that frame (relative to skipped frames)

@@ -1,609 +1,687 @@
-import os
-import sys
-from typing import List, Tuple
-
-import numpy as np
-import matplotlib.pyplot as plt
 import cv2
+import numpy as np
+import logging
 import time
+import os
+from detect_plate import PlateDetector
+from diamond_space import DiamondSpace
+from video_stream import video
 
-import dubska
-import detection
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(levelname)s: %(message)s'
+)
 
-
-
-def robust_center(points: np.ndarray, k: float = 3.0, use_geomedian: bool = False, iters: int = 3):
-    """Robust center estimation via MAD-based outlier rejection and optional geometric median.
-
-    Returns: center (2,), cov (2x2), inliers (M,2), keep_mask (N,)
+def _find_vp_from_lines_diamond_space(lines, frame_shape, line_format):
     """
-    P = np.asarray(points, dtype=float)
-    if P.size == 0:
-        return np.array([np.nan, np.nan], dtype=float), np.eye(2) * 1e-6, P.copy(), np.zeros((0,), dtype=bool)
-    keep = np.ones(P.shape[0], dtype=bool)
-    med = None
-    for _ in range(max(1, int(iters))):
-        Q = P[keep]
-        if Q.size == 0:
-            break
-        med = np.median(Q, axis=0)
-        mad = np.median(np.abs(Q - med), axis=0) + 1e-9
-        keep = (np.abs(P - med) <= float(k) * mad).all(axis=1)
-    inliers = P[keep]
-
-    # center
-    if inliers.size == 0:
-        center = np.array([np.nan, np.nan], dtype=float)
-        cov = np.eye(2) * 1e-6
-        return center, cov, inliers, keep
-
-    if use_geomedian:
-        # 2D geometric median (Weiszfeld)
-        c = (np.median(inliers, axis=0) if med is None else med).astype(float)
-        for _ in range(50):
-            d = np.linalg.norm(inliers - c, axis=1) + 1e-9
-            w = 1.0 / d
-            c_new = (inliers * w[:, None]).sum(axis=0) / w.sum()
-            if np.linalg.norm(c_new - c) < 1e-6:
-                c = c_new
-                break
-            c = c_new
-        center = c
+    Finds vanishing point using DiamondSpace accumulator.
+    
+    Args:
+        lines: List of lines in one of two formats:
+               - 'segment': [(x1, y1, x2, y2), ...] from HoughLinesP
+               - 'params': [(a, b, c), ...] from _fit_lines_to_tracks where ax + by + c = 0
+        frame_shape: (height, width) of the frame
+        line_format: 'segment' or 'params' to specify input format
+        
+    Returns:
+        Vanishing point as (x, y) tuple or None if failed
+    """
+    img_h, img_w = frame_shape
+    
+    # Convert lines to (A, B, C) format if needed
+    line_params = []
+    
+    if line_format == 'segment':
+        # Convert from (x1, y1, x2, y2) to (A, B, C)
+        for (x1, y1, x2, y2) in lines:
+            A = y2 - y1
+            B = x1 - x2
+            C = x2 * y1 - x1 * y2
+            line_params.append([A, B, C])
+    elif line_format == 'params':
+        # Lines are already in (a, b, c) format
+        line_params = [[a, b, c] for (a, b, c) in lines]
     else:
-        center = inliers.mean(axis=0)
+        logging.error(f"Unknown line_format: {line_format}")
+        return None
+    
+    if not line_params:
+        return None
+    
+    lines_np = np.array(line_params, dtype=np.float32)
+    
+    d_val = int(1.0 * max(img_w, img_h))
+    space_size = 128
+    
+    DS = DiamondSpace(d_val, space_size)
+    DS.insert(lines_np)
+    
+    p, w, p_ds = DS.find_peaks(min_dist=8, prominence=0.9, t=0.35)
+    
+    if p is None or len(p) == 0:
+        logging.warning("DiamondSpace found no peaks")
+        return None
+    
+    best_peak_xy = p[0][:2].astype(np.float32)
+    logging.info(f"DiamondSpace found VP: {best_peak_xy} with weight {w[0]:.2f}")
+    
+    return best_peak_xy
 
-    cov = np.cov(inliers.T) if inliers.shape[0] >= 3 else np.eye(2) * 1e-6
-    return center, cov, inliers, keep
+# =============================================================================
+# VP-U (Road Direction) Functions - KLT Tracking Based
+# =============================================================================
+
+def _fit_lines_to_tracks(tracks, min_track_len=10, min_track_displacement=50):
+    """
+    Fits lines (ax + by + c = 0) to tracks that pass length and displacement filters.
+    """
+    lines = []
+    valid_tracks_count = 0
+    
+    for track in tracks:
+        if len(track) < min_track_len:
+            continue
+        
+        start_point = track[0]
+        end_point = track[-1]
+        displacement = np.linalg.norm(start_point - end_point)
+        
+        if displacement < min_track_displacement:
+            continue
+        
+        valid_tracks_count += 1
+        points = np.array(track).reshape(-1, 2)
+        line_params = cv2.fitLine(points, cv2.DIST_L2, 0, 0.01, 0.01)
+        
+        vx, vy, x0, y0 = line_params.flatten()
+        a = vy
+        b = -vx
+        c = vx * y0 - vy * x0
+        lines.append((a, b, c))
+    
+    return lines
 
 
-def detect_vertical_from_image(image) -> List[Tuple[float, float]]:
-    vps = detect_vps_in_inclination_range(image, inclination_range=[(np.pi/2-0.1, np.pi/2+0.1)])
-    sel = [(float(x), float(y)) for (x, y) in vps if float(y) > 0.0]
-    return sel[0] if sel else None
-
-def detect_vps_in_inclination_range(image, inclination_range: List[Tuple[float, float]]) -> List[Tuple[float, float]]:
-    vps = dubska.detect_vanishing_points_debug(
-        image,
-        tensor_smoothing=True,
-        show=False,
-        save_dir=None,
-        space_size=256,
-        # Tuning per user request
-        edgelet_min_spacing_px=20,
-        edge_sigma_yx=(1.0, 1.0),
-        edge_threshold=0.30,
-        tensor_alpha=1,
-        peak_threshold=0.35,
-        peak_prominence=0.9,
-        peak_min_dist=8,
-        support_max_dist_px=10,
-        support_top_k=2500,
-        random_sample_if_dense=0,
-        select_manhattan_best=True,
-        candidate_k=10,
-        sensor_width_mm=6.17,
-        focal_mm_bounds=(40.0, 40.0),
-        color_edgelets_by_inclination=True,
-        max_edgelets_color_show=20000,
-        max_edgelets_ds_show=4000,
-        ds_line_samples=64,
-        inclination_ranges=inclination_range,
-        # Turn off all visualizations for speed/quiet
-        viz_input_image=False,
-        viz_edges_and_gradients=False,
-        viz_nms_local_maxima=False,
-        viz_nms_suppressed_map=False,
-        viz_inclination_prefilter=False,
-        viz_inclination_lengthfilter=False,
-        viz_accumulator_and_peaks=False,
-        viz_accumulator_all_candidates_numbered=False,
-        viz_diamond_space_edgelets_inclination=False,
-        viz_folded_two_spaces=False,
-        viz_overlay_vps_on_image=False,
-        viz_all_candidates_on_image=False,
-        viz_edgelets_inclination_on_image=False,
-        viz_supporting_lines_combined=False,
-        viz_supporting_lines_panels=False,
-        viz_quadrants=False,
-        viz_manhattan_check=False,
-        # Also disable drawing support lines for speed
-        draw_support_lines=False,
+def estimate_vp_u(min_valid_lines_to_stop=200, show_video=False):
+    """
+    Estimates the road direction vanishing point (u) using KLT tracking.
+    
+    Uses the global video stream object to process frames and track features
+    using the KLT (Kanade-Lucas-Tomasi) algorithm. Tracks are fitted to lines
+    and accumulated until sufficient valid lines are collected.
+    
+    Args:
+        min_valid_lines_to_stop: Stop after collecting this many valid lines (default: 500)
+        show_video: Display tracking visualization and save debug video (default: False)
+        
+    Returns:
+        vp_u: (x, y) coordinates of vanishing point u, or None if failed
+    """
+    logging.info("="*80)
+    logging.info("PHASE 1: Estimating VP-u (Road Direction) using KLT Tracking")
+    logging.info("="*80)
+    
+    # Create output directory if show_video is enabled
+    video_writer = None
+    if show_video:
+        output_dir = 'test_output/vp_debug'
+        os.makedirs(output_dir, exist_ok=True)
+    
+    # Parameters
+    min_dist = 5
+    min_frame_displacement=1.0
+    min_track_len_filter = 10
+    min_track_disp_filter = 100
+    roi = video.roi_mask
+    
+    feature_params = dict(
+        maxCorners=100,
+        qualityLevel=0.3,
+        minDistance=min_dist,
+        blockSize=7,
+        mask=roi
     )
-    return vps
-
-def plot_direction_histogram(window_size, start_idx, end_idx, chosen_bins, angle_bins_counts):
-    # Plot histogram and draw the selected window
-    x_centers_deg = 2.0 * (np.arange(90) + 0.5)  # 0..180 deg centers
-    width_deg = 2.0
-
-    plt.figure(figsize=(10, 4))
-    plt.bar(x_centers_deg, angle_bins_counts, width=width_deg*0.9, align='center', edgecolor='black')
-
-    # Shade the selected window; handle wrap-around
-    def span(start, end, color='orange', alpha=0.2, label=None):
-        x0 = 2.0 * start
-        x1 = 2.0 * (end + 1)
-        plt.axvspan(x0, x1, color=color, alpha=alpha, label=label)
-
-    if start_idx <= end_idx:
-        span(start_idx, end_idx, label=f'selected window ({window_size} hue = {2*window_size}°)')
+    
+    lk_params = dict(
+        winSize=(15, 15),
+        maxLevel=4,
+        criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 10, 0.03)
+    )
+    
+    first_frame_count, old_frame = video.get_frame()
+    if old_frame is None:
+        logging.error("Could not read first frame")
+        return None
+    
+    # Initialize video writer if show_video is enabled
+    if show_video:
+        frame_h, frame_w = old_frame.shape[:2]
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        video_writer = cv2.VideoWriter(
+            'test_output/vp_debug/vp_u_tracking.mp4',
+            fourcc, 20.0, (frame_w, frame_h)
+        )
+    
+    p0 = cv2.goodFeaturesToTrack(old_frame, **feature_params)
+    
+    all_valid_lines = []
+    if p0 is not None:
+        active_tracks = {i: [p0[i].ravel()] for i in range(len(p0))}
+        logging.info(f"Found {len(p0)} initial features to track")
     else:
-        # Wraps around: [start..89] U [0..end]
-        span(start_idx, 89)
-        span(0, end_idx)
-        plt.text(2.0 * ((end_idx + start_idx) / 2.0), plt.ylim()[1]*0.95, f'{2*window_size}° window', ha='center', color='orange')
-
-    # Mark chosen (largest) bin centers inside the window
-    for i in chosen_bins:
-        plt.axvline(2.0 * (i + 0.5), color='red', linestyle='--', linewidth=1)
-
-    plt.xlabel('Flow orientation (degrees, folded to [0, 180))')
-    plt.ylabel('Weighted frequency (sum of V)')
-    plt.title('Folded Hue Orientation Histogram with Selected 10-hue Window')
-    plt.legend(loc='upper right')
-    print("Selected window (hue bins):", start_idx, "->", end_idx,
-          "| size:", window_size, "(=", 2*window_size, "degrees)")
-    print("Chosen bins inside window:", chosen_bins)
-    print("final time= " + str(time.perf_counter()))
-    plt.tight_layout()
-
-def find_vp_from_geomedian_and_plot(vp1_list, plot=True):
-    if vp1_list:
-        vp1_array = np.array([vp for vp in vp1_list if vp is not None], dtype=float)
-        center, cov, inliers, keep_mask = robust_center(vp1_array, k=3.0, use_geomedian=False, iters=3)
-        outliers = vp1_array[~keep_mask] if keep_mask.shape[0] == vp1_array.shape[0] else np.empty((0, 2), dtype=float)
-        if plot:
-            fig, ax = plt.subplots(1, 1, figsize=(6, 6))
-            if outliers.size:
-                ax.scatter(outliers[:, 0], outliers[:, 1], s=10, c='tab:red', alpha=0.7, label='outliers', edgecolors='none')
-            if inliers.size:
-                ax.scatter(inliers[:, 0], inliers[:, 1], s=12, c='tab:green', alpha=0.85, label='inliers', edgecolors='none')
-            if np.all(np.isfinite(center)):
-                ax.scatter([center[0]], [center[1]], s=60, c='gold', marker='*', label='robust VP', edgecolors='black', linewidths=0.6)
-            ax.set_xlabel('VP x (pixels)')
-            ax.set_ylabel('VP y (pixels)')
-            ax.set_title('VP1 positions (step=10, N≈400) with robust center')
-            ax.legend(loc='best')
-            fig.tight_layout()
-            out_png = os.path.join("test_video", "vp_debug", "vp1_scatter_0_4000_step10_robust.png")
-            os.makedirs(os.path.dirname(out_png), exist_ok=True)
-            fig.savefig(out_png, dpi=150)
-            print(f"[saved] scatter plot -> {out_png}")
-            print(f"[robust] center ~ (x={center[0]:.2f}, y={center[1]:.2f}), inliers={inliers.shape[0]}/{vp1_array.shape[0]}")
-            plt.show()
-        return center
+        active_tracks = {}
+    
+    next_feature_id = len(active_tracks)
+    early_exit = False
+    
+    while True:
+        frame_count, frame = video.get_frame()
+        if frame is None:
+            break
+        
+        newly_completed_tracks = []
+        
+        if not active_tracks:
+            p0 = cv2.goodFeaturesToTrack(old_frame, **feature_params)
+            if p0 is not None:
+                active_tracks = {i + next_feature_id: [p0[i].ravel()] for i in range(len(p0))}
+                next_feature_id += len(p0)
+            else:
+                old_frame = frame.copy()
+                continue
+        
+        p0_list = np.array([track[-1] for track in active_tracks.values()]).astype(np.float32).reshape(-1, 1, 2)
+        p1, status, err = cv2.calcOpticalFlowPyrLK(old_frame, frame, p0_list, None, **lk_params)
+        
+        new_active_tracks = {}
+        track_ids = list(active_tracks.keys())
+        
+        if p1 is not None:
+            for track_id, pt_new, st in zip(track_ids, p1, status):
+                track = active_tracks[track_id]
+                
+                if st == 1:
+                    pt_old = track[-1]
+                    displacement = np.linalg.norm(pt_new.ravel() - pt_old)
+                    
+                    if displacement < min_frame_displacement:
+                        if len(track) > 1:
+                            newly_completed_tracks.append(track)
+                        continue
+                    
+                    track.append(pt_new.ravel())
+                    new_active_tracks[track_id] = track
+                else:
+                    if len(track) > 1:
+                        newly_completed_tracks.append(track)
+        
+        active_tracks = new_active_tracks
+        
+        if newly_completed_tracks:
+            new_lines = _fit_lines_to_tracks(newly_completed_tracks, 
+                                           min_track_len=min_track_len_filter,
+                                           min_track_displacement=min_track_disp_filter)
+            if new_lines:
+                all_valid_lines.extend(new_lines)
+        
+        if len(all_valid_lines) > min_valid_lines_to_stop:
+            logging.info(f"Collected {len(all_valid_lines)} valid lines, stopping")
+            break
+        
+        if show_video:
+            vis_frame = cv2.cvtColor(frame.copy(), cv2.COLOR_GRAY2BGR)
+            for track in active_tracks.values():
+                for k in range(len(track) - 1):
+                    x1, y1 = map(int, track[k])
+                    x2, y2 = map(int, track[k+1])
+                    cv2.line(vis_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                last_pt = track[-1]
+                cv2.circle(vis_frame, (int(last_pt[0]), int(last_pt[1])), 5, (0, 0, 255), -1)
+            
+            # Add text overlay
+            cv2.putText(vis_frame, f"Frame: {frame_count} | Lines: {len(all_valid_lines)}/{min_valid_lines_to_stop}", 
+                       (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+            cv2.putText(vis_frame, f"Active Tracks: {len(active_tracks)}", 
+                       (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+            
+            # Write to video
+            if video_writer is not None:
+                video_writer.write(vis_frame)
+            
+            cv2.imshow('KLT Tracking for VP-u', vis_frame)
+            if cv2.waitKey(50) & 0xFF == ord('q'):
+                early_exit = True
+                break
+        
+        old_frame = frame.copy()
+        
+        if frame_count % 10 == 0 and len(active_tracks) < 50:
+            p0_new = cv2.goodFeaturesToTrack(old_frame, **feature_params)
+            if p0_new is not None:
+                for pt in p0_new:
+                    if not any(np.linalg.norm(pt.ravel() - track[-1]) < 5 for track in active_tracks.values()):
+                        active_tracks[next_feature_id] = [pt.ravel()]
+                        next_feature_id += 1
+    
+    # Add remaining active tracks
+    final_active_tracks = list(active_tracks.values())
+    if final_active_tracks:
+        new_lines = _fit_lines_to_tracks(final_active_tracks,
+                                       min_track_len=min_track_len_filter,
+                                       min_track_displacement=min_track_disp_filter)
+        if new_lines:
+            all_valid_lines.extend(new_lines)
+    
+    if show_video:
+        if video_writer is not None:
+            video_writer.release()
+            logging.info(f"Saved video to: test_output/vp_debug/vp_u_tracking.mp4")
+        cv2.destroyAllWindows()
+        cv2.waitKey(1)  # Process window destruction events
+    
+    if early_exit:
+        logging.info("Early exit requested by user")
+    
+    logging.info(f"Tracking complete: {frame_count - first_frame_count} frames, {len(all_valid_lines)} valid lines")
+    
+    if len(all_valid_lines) < 10:
+        logging.error(f"Only {len(all_valid_lines)} valid lines. Cannot estimate VP-u.")
+        return None
+    
+    frame_shape = old_frame.shape[:2]
+    
+    # Use DiamondSpace with 'params' format (lines are already in (a, b, c) format)
+    vp_u = _find_vp_from_lines_diamond_space(all_valid_lines, frame_shape, 'params')
+    
+    if vp_u is not None:
+        logging.info(f"VP-u estimated: {tuple(vp_u)}")
+        return tuple(vp_u)
+    
     return None
 
-def select_greedy_hue_window(counts, window_size=10, coverage_threshold: float = None):
-    """Select a circular window of bins.
 
-    Modes
-    -----
-    1. Legacy fixed-size mode (coverage_threshold is None):
-       Greedily add highest-weight bins while the minimal circular arc covering them
-       does not exceed ``window_size``; return that arc.
-    2. Coverage mode (coverage_threshold provided):
-       Find the *minimal-length contiguous circular window* whose summed weight
-       reaches at least ``coverage_threshold`` fraction of the total weight.
-       This minimizes number of bins subject to the coverage constraint.
+# =============================================================================
+# VP-V (Perpendicular Direction) Functions - Plate Detection Based
+# =============================================================================
 
-    Parameters
-    ----------
-    counts : array-like of shape (N,)
-        Histogram weights per folded hue/orientation bin.
-    window_size : int
-        Max arc length for legacy mode; ignored in coverage mode.
-    coverage_threshold : float in (0,1], optional
-        Fraction of total weight that the chosen contiguous window must cover.
-
-    Returns
-    -------
-    start_idx, end_idx, chosen_indices
-        Inclusive start & end (wrap if start>end); chosen_indices are all bins
-        inside the window.
-    """
-    counts = np.asarray(counts, dtype=float)
-    N = counts.size
-    if N == 0:
-        return (0, -1, [])
-
-    if coverage_threshold is None:
-        # --- Legacy greedy non-contiguous selection; kept for backward compatibility ---
-        order = np.argsort(counts)[::-1]
-        selected = []
-
-        def minimal_cover_arc(idxs):
-            if not idxs:
-                return 0, 0, 0
-            arr = np.sort(np.array(idxs, dtype=int))
-            diffs = np.diff(np.r_[arr, arr[0] + N])
-            max_gap_idx = int(np.argmax(diffs))
-            max_gap = diffs[max_gap_idx]
-            length = N - max_gap
-            start = (arr[(max_gap_idx + 1) % arr.size]) % N
-            end = (start + length - 1) % N
-            return int(length), int(start), int(end)
-
-        best_len, best_start, best_end = 0, 0, -1
-        for idx in order:
-            trial = selected + [int(idx)]
-            length, start, end = minimal_cover_arc(trial)
-            if length <= int(window_size):
-                selected = trial
-                best_len, best_start, best_end = length, start, end
-            else:
-                break
-
-        def within_window(i, s, e):
-            return (s <= e and s <= i <= e) or (s > e and (i >= s or i <= e))
-        chosen = [i for i in selected if within_window(i, best_start, best_end)]
-        return best_start, best_end, chosen
-
-    # --- Coverage mode: minimal-length contiguous circular arc meeting threshold ---
-    coverage_threshold = float(max(0.0, min(1.0, coverage_threshold)))
-    total = float(counts.sum())
-    if coverage_threshold <= 0.0 or total <= 0.0:
-        return (0, -1, [])
-    target = coverage_threshold * total
-
-    # Duplicate array for circular wrap handling
-    counts2 = np.concatenate([counts, counts])
-    best_len = N + 1
-    best_start = 0
-    best_end = -1
-    cur_sum = 0.0
-    j = 0
-    for i in range(N):
-        while j < i + N and cur_sum < target:
-            cur_sum += counts2[j]
-            j += 1
-        if cur_sum >= target:
-            length = j - i
-            if length < best_len:
-                best_len = length
-                best_start = i % N
-                best_end = (j - 1) % N
-        # Slide window start
-        cur_sum -= counts2[i]
-        # Early break: remaining bins cannot form shorter window than current best
-        if N - i < best_len:  # remaining start positions insufficient
-            break
-
-    if best_len == N + 1:  # not found
-        return (0, -1, [])
-
-    # Build chosen indices list
-    if best_start <= best_end:
-        chosen = list(range(best_start, best_end + 1))
-    else:
-        chosen = list(range(best_start, N)) + list(range(0, best_end + 1))
-    return best_start, best_end, chosen
-
-def detect_road_and_vertical_vps(road_angle_range, sampled_images, plot=False):
-    road_vp1_list = []
-    vertical_vp1_list = []
-    for image in sampled_images:
-        vertical_vp1_list.append(detect_vertical_from_image(image))
-        road_vps = detect_vps_in_inclination_range(image, [road_angle_range])
-        road_vp1 = road_vps[0] if len(road_vps) else None
-        road_vp1_list.append(road_vp1)
-    final_vertical_vp1 = find_vp_from_geomedian_and_plot(vertical_vp1_list, plot=plot)
-    final_road_vp1 = find_vp_from_geomedian_and_plot(road_vp1_list, plot=plot)
-    return final_road_vp1, final_vertical_vp1
-
-# =====================
-# Calibration-constrained joint VP estimation
-# =====================
-def _vp_constraint(x: np.ndarray, cx: float, cy: float, f: float) -> float:
-    """Orthogonality constraint between two VPs under intrinsics (cx, cy, f).
-
-    Let x = [v1x, v1y, v2x, v2y]. The constraint comes from orthogonality of the
-    corresponding 3D directions with intrinsic matrix K = diag(f, f, 1) and principal
-    point (cx, cy), yielding:
-
-        (v1x-cx)*(v2x-cx) + (v1y-cy)*(v2y-cy) + f^2 = 0
-
-    Returns g(x); feasible points satisfy g(x) ≈ 0.
-    """
-    v1x, v1y, v2x, v2y = x
-    return (v1x - cx) * (v2x - cx) + (v1y - cy) * (v2y - cy) + (f ** 2)
-
-
-def _project_to_constraint(x: np.ndarray, cx: float, cy: float, f: float) -> np.ndarray:
-    """Project a 4D point x to the manifold g(x)=0 using a first-order correction.
-
-    Uses one Newton-style step along the gradient of g to enforce feasibility.
-    """
-    g = _vp_constraint(x, cx, cy, f)
-    v1x, v1y, v2x, v2y = x
-    grad = np.array([v2x - cx, v2y - cy, v1x - cx, v1y - cy], dtype=float)
-    denom = float(np.dot(grad, grad)) + 1e-12
-    return x - (g / denom) * grad
-
-
-def _constrained_geomedian(
-    X: np.ndarray,
-    cx: float,
-    cy: float,
-    f: float,
-    max_iter: int = 50,
-    tol: float = 1e-6,
-):
-    """Weiszfeld-style geometric median in R^4 with per-iteration projection.
-
-    Parameters
-    - X: (N,4) with rows [v1x, v1y, v2x, v2y]
-    - cx, cy, f: camera intrinsics
-    - max_iter, tol: iteration controls
-
-    Returns
-    - m: (4,) numpy array on the constraint manifold (approximately)
-    """
-    X = np.asarray(X, dtype=float)
-    if X.size == 0:
-        return None
-    # Initial guess: coordinate-wise median projected to the manifold
-    m = np.median(X, axis=0)
-    m = _project_to_constraint(m, cx, cy, f)
-    for _ in range(max(1, int(max_iter))):
-        diffs = X - m
-        dists = np.linalg.norm(diffs, axis=1)
-        # Avoid zero division; very small distances get large but bounded weights
-        w = 1.0 / np.maximum(dists, 1e-6)
-        m_new = (X * w[:, None]).sum(axis=0) / w.sum()
-        m_new = _project_to_constraint(m_new, cx, cy, f)
-        if float(np.linalg.norm(m_new - m)) < float(tol):
-            m = m_new
-            break
-        m = m_new
-    return m
-
-
-def detect_road_and_vertical_vps_with_calibration(
-    road_angle_range: Tuple[float, float],
-    sampled_images: List[np.ndarray],
-    cx: float,
-    cy: float,
-    f: float,
-    max_iter: int = 50,
-    tol: float = 1e-6,
-):
-    """Detect per-frame road and vertical VPs, then jointly robustify under intrinsics.
-
-    - road_angle_range: (min_angle, max_angle) in radians for the road-direction VP search
-    - sampled_images: list of grayscale images (H,W) float or uint8 (will be passed through)
-    - cx, cy, f: camera intrinsics (principal point in px, focal length in px)
-    - returns: (road_vp, vertical_vp) as two (2,) arrays or (None, None) if not enough data
-
-    Convention: v1 = road VP, v2 = vertical VP in the 4D stacking [v1x, v1y, v2x, v2y].
-    """
-    detections_4d = []
-
-    for image in sampled_images:
-        v_vert = detect_vertical_from_image(image)
-        road_vps = detect_vps_in_inclination_range(image, [road_angle_range])
-        v_road = road_vps[0] if len(road_vps) else None
-
-        if v_vert is None or v_road is None:
-            continue
-
-        v1x, v1y = float(v_road[0]), float(v_road[1])
-        v2x, v2y = float(v_vert[0]), float(v_vert[1])
-        if not (np.isfinite([v1x, v1y, v2x, v2y]).all()):
-            continue
-        detections_4d.append([v1x, v1y, v2x, v2y])
-
-    if len(detections_4d) == 0:
-        return None, None
-
-    X = np.asarray(detections_4d, dtype=float)
-    mu = _constrained_geomedian(X, cx=cx, cy=cy, f=f, max_iter=max_iter, tol=tol)
-    if mu is None or not np.isfinite(mu).all():
-        return None, None
-
-    v1_hat = mu[:2]
-    v2_hat = mu[2:]
-    return v1_hat, v2_hat
-
-def main() -> None:
-    video_path = "dataset/session0_center/video.avi"
-    d = detection.Detection(video_path, max_frames=1000)
-    d.init_flows(dis_preset="FAST")
+def _find_lines_with_hough(frame, gradient_threshold=50):
+    """Finds straight line segments using masked gradient."""
+    grad_x = cv2.Sobel(frame, cv2.CV_32F, 1, 0, ksize=3)
+    grad_y = cv2.Sobel(frame, cv2.CV_32F, 0, 1, ksize=3)
+    grad_mag = np.sqrt(grad_x**2 + grad_y**2)
+    grad_mag_norm = cv2.normalize(grad_mag, None, 0, 255, cv2.NORM_MINMAX, cv2.CV_8U)
+    masked_grad = cv2.bitwise_and(grad_mag_norm, grad_mag_norm, mask=video.roi_mask)
     
-    step = 10
-    sampled_images = []
+    _, wireframe = cv2.threshold(masked_grad, gradient_threshold, 255, cv2.THRESH_BINARY)
+    
+    lines = cv2.HoughLinesP(wireframe, rho=1, theta=np.pi/180, threshold=50,
+                            minLineLength=20, maxLineGap=2)
+    
+    raw_lines = []
+    if lines is not None:
+        for line in lines:
+            raw_lines.append(line[0])
+    
+    return wireframe, raw_lines
 
-    for i in range(0, len(d.frames), step):
-        frame = d.frames[i]
+
+def _filter_lines_by_vp(lines, vp_u, angle_threshold_deg=60):
+    """Removes lines pointing towards the first vanishing point (u)."""
+    filtered = []
+    threshold_rad = np.deg2rad(angle_threshold_deg)
+    
+    for line in lines:
+        x1, y1, x2, y2 = line
+        dx, dy = x2 - x1, y2 - y1
+        if dx == 0 and dy == 0:
+            continue
+        
+        orientation = np.array([dx, dy]) / np.linalg.norm([dx, dy])
+        if orientation[0] < 0:
+            orientation = -orientation
+        
+        mid_point = np.array([(x1 + x2) / 2, (y1 + y2) / 2])
+        vec_to_vp = vp_u - mid_point
+        vec_to_vp_norm = np.linalg.norm(vec_to_vp)
+        if vec_to_vp_norm == 0:
+            continue
+        
+        vec_to_vp = vec_to_vp / vec_to_vp_norm
+        dot_product = np.abs(np.dot(orientation, vec_to_vp))
+        
+        if dot_product < np.cos(threshold_rad):
+            filtered.append(line)
+    
+    return filtered
+
+
+def _estimate_plate_angle_from_aspect_ratio(plate_box, known_ratio=5.0):
+    """
+    Estimates plate orientation from aspect ratio (520mm x 110mm ≈ 5:1).
+    Returns (angles_list, bbox_aspect) or (None, None).
+    """
+    x1, y1, x2, y2 = plate_box
+    bbox_width = x2 - x1
+    bbox_height = y2 - y1
+    
+    if bbox_width <= 0 or bbox_height <= 0:
+        return None, None
+    
+    bbox_aspect = bbox_width / bbox_height
+    
+    if bbox_aspect >= known_ratio:
+        return [0.0], bbox_aspect
+    
+    theta = np.arcsin(bbox_aspect / known_ratio)
+    angle1 = theta
+    angle2 = np.pi - theta
+    
+    return [angle1, angle2], bbox_aspect
+
+
+def _get_plate_angle(plate_boxes):
+    """Calculates possible angles from detected plate boxes."""
+    for box in plate_boxes:
+        angles, bbox_aspect = _estimate_plate_angle_from_aspect_ratio(box, known_ratio=5.0)
+        if angles is not None and len(angles) > 0:
+            return angles, bbox_aspect, box
+    return None, None, None
+
+
+def _filter_lines_by_plate_angles(lines, target_angles, angle_tolerance_deg=15):
+    """Keeps only lines close to target angles from plate detection."""
+    filtered = []
+    tolerance_rad = np.deg2rad(angle_tolerance_deg)
+    
+    for line in lines:
+        x1, y1, x2, y2 = line
+        dx = x2 - x1
+        dy = y2 - y1
+        if dx == 0 and dy == 0:
+            continue
+        
+        line_angle = np.arctan2(dy, dx) % np.pi
+        
+        for target_angle in target_angles:
+            angle_diff = line_angle - target_angle
+            angle_diff = (angle_diff + np.pi/2) % np.pi - np.pi/2
+            
+            if np.abs(angle_diff) <= tolerance_rad:
+                filtered.append(line)
+                break
+    
+    return filtered
+
+
+def estimate_vp_v(vp_u, plate_detector, show_video=False):
+    """
+    Two-phase estimation of perpendicular vanishing point (v):
+    Phase 1: Collect plate angles from detected license plates (10 plates)
+    Phase 2: Detect lines using Hough transform, filter by VP-u and plate angles, calculate VP-v
+    
+    Uses the global video stream object to process frames. Lines are filtered to exclude
+    those pointing toward VP-u, then further filtered to match angles derived from
+    license plate aspect ratios.
+    
+    Args:
+        vp_u: Previously computed VP-u as (x, y) tuple
+        plate_detector: PlateDetector instance for license plate detection
+        show_video: Display visualization and save debug videos (default: False)
+        
+    Returns:
+        vp_v: (x, y) coordinates of vanishing point v, or None if failed
+    """
+    logging.info("="*80)
+    logging.info("PHASE 2: Estimating VP-v (Perpendicular) using Plate Detection")
+    logging.info("="*80)
+    
+    # Create output directory if show_video is enabled
+    video_writer_phase1 = None
+    video_writer_phase2 = None
+    if show_video:
+        output_dir = 'test_output/vp_debug'
+        os.makedirs(output_dir, exist_ok=True)
+    
+    # Phase tracking
+    collected_plate_angles = []
+    required_good_plates = 10
+    good_plate_count = 0
+    required_filtered_lines = 2000
+    accumulated_filtered_lines = []
+    
+    # Phase 1: Plate Detection
+    logging.info(f"\nPhase 1: Collecting angles from {required_good_plates} plates...")
+    
+    while good_plate_count < required_good_plates:
+        frame_count, frame = video.get_frame_background_subtracted()
         if frame is None:
             continue
-
-        # Convert to grayscale float32 in [0,1]; handle both color and already-grayscale frames
-        if frame.ndim == 3 and frame.shape[2] >= 3:
-            gray_src = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        else:
-            gray_src = frame
-        gray = gray_src.astype(np.float32) / 255.0
-        sampled_images.append(gray)
-
-    print(f"[info] extracted {len(sampled_images)} grayscale frames (step={step})")
-
-    angle_bins_counts = np.zeros(90, dtype=np.float64)  # folded orientation
-    intensity_threshold = 5  # Ignore very low intensity (background/noise)
-    if d._hsv_flows is not None:
-        for hsv in d._hsv_flows:
-            hue_h = hsv[:, :, 0].astype(np.int16)   # 0..179
-            val_v = hsv[:, :, 2].astype(np.float32)
-            mask = val_v > intensity_threshold
-            if not np.any(mask):
-                continue
-            h_sel = (hue_h[mask] % 90).astype(np.int32)  # 0..89 folded
-            w_sel = val_v[mask].astype(np.float64)       # weights
-            # Accumulate weights into counts
-            counts = np.bincount(h_sel, weights=w_sel, minlength=90)
-            angle_bins_counts += counts
-
-    # Greedy hue window selection (coverage mode example): capture 80% of total weight
-    coverage_threshold = 0.80
-    window_size = 15  # still used for legacy mode plotting label if desired
-    start_idx, end_idx, chosen_bins = select_greedy_hue_window(
-        angle_bins_counts,
-        window_size=window_size,
-        coverage_threshold=coverage_threshold
-    )
-    plot_direction_histogram(window_size=window_size, start_idx=start_idx, end_idx=end_idx, chosen_bins=chosen_bins, angle_bins_counts=angle_bins_counts)
-
-    start_angle = start_idx * np.pi / 90
-    end_angle = end_idx * np.pi / 90
-
-    # ----------------------------------------------
-    # Gather per-frame detections once (for dispersion plotting)
-    # ----------------------------------------------
-    road_vp_list = []
-    vert_vp_list = []
-    for image in sampled_images:
-        v_vert = detect_vertical_from_image(image)
-        vps_road = detect_vps_in_inclination_range(image, [(start_angle, end_angle)])
-        v_road = vps_road[0] if len(vps_road) else None
-        vert_vp_list.append(v_vert)
-        road_vp_list.append(v_road)
-
-    # Unconstrained per-axis robust centers (baseline)
-    road_arr = np.array([v for v in road_vp_list if v is not None], dtype=float)
-    vert_arr = np.array([v for v in vert_vp_list if v is not None], dtype=float)
-    road_uncon, _, road_inliers, _ = robust_center(road_arr, k=3.0, use_geomedian=False, iters=3) if road_arr.size else (np.array([np.nan, np.nan]), None, np.empty((0, 2)), None)
-    vert_uncon, _, vert_inliers, _ = robust_center(vert_arr, k=3.0, use_geomedian=False, iters=3) if vert_arr.size else (np.array([np.nan, np.nan]), None, np.empty((0, 2)), None)
-
-    # Calibrated joint estimate
-    if len(sampled_images) > 0:
-        H, W = sampled_images[0].shape[:2]
-        cx = W / 2.0
-        cy = H / 2.0
-    else:
-        cx = cy = 0.0
-    f = 2668.0
-
-    road_calib, vert_calib = detect_road_and_vertical_vps_with_calibration(
-        (start_angle, end_angle), sampled_images, cx=cx, cy=cy, f=f
-    )
-
-    print("[unconstrained] Vertical VP:", vert_uncon)
-    print("[unconstrained] Road VP:", road_uncon)
-    print("[calibrated]   Vertical VP:", vert_calib)
-    print("[calibrated]   Road VP:", road_calib)
-
-    # ----------------------------------------------
-    # Comparison plots: dispersion + final estimates
-    # ----------------------------------------------
-    def _scatter_points(ax, pts, label, color, s=10, alpha=0.7):
-        if pts is not None and len(pts):
-            A = np.array([p for p in pts if p is not None], dtype=float)
-            if A.size:
-                ax.scatter(A[:, 0], A[:, 1], s=s, c=color, alpha=alpha, label=label, edgecolors='none')
-
-    fig, axes = plt.subplots(1, 2, figsize=(12, 6))
-
-    # Road VP subplot
-    ax = axes[0]
-    _scatter_points(ax, road_vp_list, 'road detections', 'tab:blue', s=12, alpha=0.6)
-    if np.all(np.isfinite(road_uncon)):
-        ax.scatter([road_uncon[0]], [road_uncon[1]], s=80, c='gold', marker='*', edgecolors='black', linewidths=0.6, label='road unconstrained')
-    if road_calib is not None and np.all(np.isfinite(road_calib)):
-        ax.scatter([road_calib[0]], [road_calib[1]], s=70, c='tab:red', marker='X', label='road calibrated')
-    ax.set_title('Road VP dispersion and estimates')
-    ax.set_xlabel('x (px)')
-    ax.set_ylabel('y (px)')
-    ax.legend(loc='best')
-    ax.grid(True, alpha=0.2)
-
-    # Vertical VP subplot
-    ax = axes[1]
-    _scatter_points(ax, vert_vp_list, 'vertical detections', 'tab:green', s=12, alpha=0.6)
-    if np.all(np.isfinite(vert_uncon)):
-        ax.scatter([vert_uncon[0]], [vert_uncon[1]], s=80, c='gold', marker='*', edgecolors='black', linewidths=0.6, label='vertical unconstrained')
-    if vert_calib is not None and np.all(np.isfinite(vert_calib)):
-        ax.scatter([vert_calib[0]], [vert_calib[1]], s=70, c='tab:red', marker='X', label='vertical calibrated')
-    ax.set_title('Vertical VP dispersion and estimates')
-    ax.set_xlabel('x (px)')
-    ax.set_ylabel('y (px)')
-    ax.legend(loc='best')
-    ax.grid(True, alpha=0.2)
-
-    fig.tight_layout()
-    out_png = os.path.join("test_video", "vp_debug", "vp_comparison.png")
-    os.makedirs(os.path.dirname(out_png), exist_ok=True)
-    fig.savefig(out_png, dpi=150)
-    print(f"[saved] comparison plot -> {out_png}")
-    plt.show()
-
-
-
-
-"""
-def main() -> None:
-    # Configuration: sample VP1 every 10 frames up to 4000 (exclusive) -> 400 samples
-    folder = os.path.join("dataset", "session0_left")
-    video_path = os.path.join(folder, "video.avi")
-    indices = list(range(0, 4000, 10))
+        
+        # Initialize video writer for phase 1
+        if show_video and video_writer_phase1 is None and frame is not None:
+            frame_h, frame_w = frame.shape[:2]
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            video_writer_phase1 = cv2.VideoWriter(
+                'test_output/vp_debug/vp_v_phase1_plates.mp4',
+                fourcc, 20.0, (frame_w, frame_h)
+            )
+        
+        plate_boxes = plate_detector.detect(frame, size=640, save_crops=False)
+        
+        if len(plate_boxes) == 0:
+            if show_video:
+                vis_frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+                cv2.putText(vis_frame, f"Phase 1: Plates {good_plate_count}/{required_good_plates}", 
+                           (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+                if video_writer_phase1 is not None:
+                    video_writer_phase1.write(vis_frame)
+                cv2.imshow("Phase 1: Plate Detection", vis_frame)
+                cv2.waitKey(1)
+            continue
+        
+        plate_angles, bbox_aspect, plate_box = _get_plate_angle(plate_boxes)
+        
+        if plate_angles is None:
+            if show_video:
+                vis_frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+                # Draw detected plates
+                for box in plate_boxes:
+                    x1, y1, x2, y2 = map(int, box)
+                    cv2.rectangle(vis_frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
+                cv2.putText(vis_frame, f"Phase 1: Plates {good_plate_count}/{required_good_plates} (Invalid aspect)", 
+                           (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                if video_writer_phase1 is not None:
+                    video_writer_phase1.write(vis_frame)
+                cv2.imshow("Phase 1: Plate Detection", vis_frame)
+                cv2.waitKey(1)
+            continue
+        
+        collected_plate_angles.extend(plate_angles)
+        good_plate_count += 1
+        
+        if show_video:
+            vis_frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+            # Draw all detected plates
+            for box in plate_boxes:
+                x1, y1, x2, y2 = map(int, box)
+                cv2.rectangle(vis_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+            # Highlight the used plate
+            if plate_box is not None:
+                x1, y1, x2, y2 = map(int, plate_box)
+                cv2.rectangle(vis_frame, (x1, y1), (x2, y2), (0, 255, 255), 3)
+                cv2.putText(vis_frame, f"Aspect: {bbox_aspect:.2f}", 
+                           (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
+            cv2.putText(vis_frame, f"Phase 1: Plates {good_plate_count}/{required_good_plates}", 
+                       (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+            if video_writer_phase1 is not None:
+                video_writer_phase1.write(vis_frame)
+            # Save periodic snapshots
+            if good_plate_count % 2 == 0:
+                cv2.imwrite(f'test_output/vp_debug/vp_v_phase1_plate_{good_plate_count:02d}.png', vis_frame)
+            cv2.imshow("Phase 1: Plate Detection", vis_frame)
+            cv2.waitKey(1)
     
-
-    if not os.path.isfile(video_path):
-        print(f"[warn] video.avi not found at: {video_path}")
-        return
+    if show_video and video_writer_phase1 is not None:
+        video_writer_phase1.release()
+        logging.info(f"Saved Phase 1 video to: test_output/vp_debug/vp_v_phase1_plates.mp4")
     
-    cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
-        raise FileNotFoundError(f"Could not open video: {video_path}")
+    if good_plate_count < required_good_plates:
+        logging.error(f"Phase 1 incomplete: Only {good_plate_count}/{required_good_plates} plates")
+        return None
+    logging.info(f"Phase 1 complete: Collected {good_plate_count} plates")
+    
+    # Phase 2: Line Detection with Filtering
+    logging.info(f"\nPhase 2: Line detection with dual filtering...")
+    logging.info(f"Using plate angles: {[f'{np.rad2deg(a):.1f}°' for a in collected_plate_angles]}")
+        
+    
+    while len(accumulated_filtered_lines) < required_filtered_lines:
+        frame_count, frame = video.get_frame()
+        if frame is None:
+            continue
+        
+        # Initialize video writer for phase 2
+        if show_video and video_writer_phase2 is None and frame is not None:
+            frame_h, frame_w = frame.shape[:2]
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            video_writer_phase2 = cv2.VideoWriter(
+                'test_output/vp_debug/vp_v_phase2_lines.mp4',
+                fourcc, 20.0, (frame_w, frame_h)
+            )
+        
+        # Detect lines
+        wireframe, raw_lines = _find_lines_with_hough(frame, gradient_threshold=50)
+        
+        # Apply dual filtering
+        vp_filtered = _filter_lines_by_vp(raw_lines, vp_u, angle_threshold_deg=45)
+        dual_filtered = _filter_lines_by_plate_angles(vp_filtered, collected_plate_angles, angle_tolerance_deg=15)
+        
+        accumulated_filtered_lines.extend(dual_filtered)
+        
+        if show_video:
+            vis_frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+            # Draw all accumulated lines (persistent display)
+            for (x1, y1, x2, y2) in accumulated_filtered_lines:
+                cv2.line(vis_frame, (x1, y1), (x2, y2), (0, 255, 0), 1)
+            cv2.putText(vis_frame, f"Phase 2: Lines {len(accumulated_filtered_lines)}/{required_filtered_lines}", 
+                       (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+            cv2.putText(vis_frame, f"Frame: {frame_count} | This frame: {len(dual_filtered)}", 
+                       (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+            
+            # Write to video
+            if video_writer_phase2 is not None:
+                video_writer_phase2.write(vis_frame)
+            
+            cv2.imshow("Phase 2: Line Detection", vis_frame)
+            if cv2.waitKey(10) & 0xFF == ord('q'):
+                logging.info("Early exit requested - stopping Phase 2")
+                break
+    
+    if show_video:
+        if video_writer_phase2 is not None:
+            video_writer_phase2.release()
+            logging.info(f"Saved Phase 2 video to: test_output/vp_debug/vp_v_phase2_lines.mp4")
+        cv2.destroyAllWindows()
+        cv2.waitKey(1)  # Process window destruction events
+    
+    logging.info(f"Phase 2 complete: {len(accumulated_filtered_lines)} dual-filtered lines")
+    
+    if not accumulated_filtered_lines:
+        logging.error("No valid lines after filtering")
+        return None
+    
+    # Calculate VP-v using 'segment' format (lines are in (x1, y1, x2, y2) format from HoughLinesP)
+    canvas_shape = frame.shape[:2]
+    vp_v = _find_vp_from_lines_diamond_space(accumulated_filtered_lines, canvas_shape, 'segment')
+    
+    if vp_v is not None:
+        logging.info(f"VP-v estimated: {vp_v}")
+    
+    return vp_v
 
-    images = []
-    for idx in indices:
-        cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
-        ok, frame = cap.read()
-        if not ok or frame is None:
-            break
+# =============================================================================
+# Main Unified Interface
+# =============================================================================
 
-        # Convert to grayscale float32 in [0,1]
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.0
-        images.append(gray)
+def detect_road_and_cross_vps(show_video=False):
+    """
+    Detect both vanishing points from traffic video.
+    
+    This is the main entry point that orchestrates the complete vanishing point detection:
+    1. Estimates VP-u (road direction) using KLT tracking of features
+    2. Estimates VP-v (perpendicular) using license plate detection and line filtering
+    
+    Uses the global video stream object for frame access. The video stream should be
+    initialized before calling this function.
+    
+    Args:
+        show_video: Display visualization during processing and save debug videos (default: False)
+        
+    Returns:
+        Tuple of (vpu, vpv) where each is (x, y) coordinates, or (None, None) if failed
+    """
+    total_start_time = time.perf_counter()
 
-    cap.release()
-    print(f"[info] extracted {len(images)} frames from video for VP detection")
+    # -------------------------------------------------------------------------
+    # Step 1: Estimate VP-u (Road Direction)
+    # -------------------------------------------------------------------------
+    video.set_intended_fps(30)
+    vpu = estimate_vp_u(
+        show_video=show_video
+    )
+    
+    if vpu is None:
+        logging.error("Failed to estimate VP-u. Cannot proceed to VP-v estimation.")
+        return None, None
+    
+    logging.info(f"\n✓ VP-u (road direction) found: {vpu}\n")
+    
+    # -------------------------------------------------------------------------
+    # Step 2: Prepare for VP-v Estimation
+    # -------------------------------------------------------------------------
+    # Initialize plate detector
+    try:
+        plate_detector = PlateDetector(conf_threshold=0.5)
+    except Exception as e:
+        logging.error(f"Failed to initialize PlateDetector: {e}")
+        return vpu, None
+    
+    # -------------------------------------------------------------------------
+    # Step 3: Estimate VP-v (Perpendicular Direction)
+    # -------------------------------------------------------------------------
+    video.set_intended_fps(10)
+    vpv = estimate_vp_v(
+        vp_u=vpu,
+        plate_detector=plate_detector,
+        show_video=show_video
+    )
+    
+    if vpv is None:
+        logging.error("Failed to estimate VP-v")
+        return vpu, None
+    
+    logging.info(f"\n✓ VP-v (perpendicular) found: {vpv}\n")
+    
+    # -------------------------------------------------------------------------
+    # Summary
+    # -------------------------------------------------------------------------
+    total_time = time.perf_counter() - total_start_time
+    
+    logging.info("="*80)
+    logging.info("DETECTION COMPLETE")
+    logging.info("="*80)
+    logging.info(f"VP-u (road direction):    {vpu}")
+    logging.info(f"VP-v (perpendicular):     {vpv}")
+    logging.info(f"Total processing time:    {total_time:.2f} seconds")
+    logging.info("="*80)
+    
+    return vpu, vpv
 
 
-    vp1_list = []
-    for image in images:
-        vps = detect_vps_in_inclination_range(image, inclination_range=[(8*np.pi/180, 38*np.pi/180)])
-        vp1 = vps[0] if len(vps) else None
-        print("AAAAAAAAA - VP1 detected at:", vp1)
-        vp1_list.append(vp1)
-
-    print(f"[summary] collected VP1 for {len(vp1_list)} / {len(indices)} frames")
-
-    # Scatter plot of VP1 positions with robust inlier/outlier classification and final VP estimate
-    if vp1_list:
-        vp1_array = np.array([vp for vp in vp1_list if vp is not None], dtype=float)
-        center, cov, inliers, keep_mask = robust_center(vp1_array, k=3.0, use_geomedian=False, iters=3)
-        outliers = vp1_array[~keep_mask] if keep_mask.shape[0] == vp1_array.shape[0] else np.empty((0, 2), dtype=float)
-
-        fig, ax = plt.subplots(1, 1, figsize=(6, 6))
-        if outliers.size:
-            ax.scatter(outliers[:, 0], outliers[:, 1], s=10, c='tab:red', alpha=0.7, label='outliers', edgecolors='none')
-        if inliers.size:
-            ax.scatter(inliers[:, 0], inliers[:, 1], s=12, c='tab:green', alpha=0.85, label='inliers', edgecolors='none')
-        if np.all(np.isfinite(center)):
-            ax.scatter([center[0]], [center[1]], s=60, c='gold', marker='*', label='robust VP', edgecolors='black', linewidths=0.6)
-        ax.set_xlabel('VP x (pixels)')
-        ax.set_ylabel('VP y (pixels)')
-        ax.set_title('VP1 positions (step=10, N≈400) with robust center')
-        ax.legend(loc='best')
-        fig.tight_layout()
-        out_png = os.path.join("test_video", "vp_debug", "vp1_scatter_0_4000_step10_robust.png")
-        os.makedirs(os.path.dirname(out_png), exist_ok=True)
-        fig.savefig(out_png, dpi=150)
-        print(f"[saved] scatter plot -> {out_png}")
-        print(f"[robust] center ~ (x={center[0]:.2f}, y={center[1]:.2f}), inliers={inliers.shape[0]}/{vp1.shape[0]}")
-        plt.show()
-"""
+# =============================================================================
+# Main Execution (for testing)
+# =============================================================================
 
 if __name__ == "__main__":
-    main()
+    detect_road_and_cross_vps(show_video=True)
