@@ -20,7 +20,7 @@ public:
     ~CameraInterface();
 
     bool initialize();
-    bool startCapture();
+    bool startCapture(long frame_interval);
     void stopCapture();
     void run(int num_frames);
 

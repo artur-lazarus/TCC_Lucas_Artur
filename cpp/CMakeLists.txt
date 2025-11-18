@@ -24,16 +24,37 @@ include_directories(
     ${EIGEN3_INCLUDE_DIR}
 )
 
-# Collect all source files from src directory
-file(GLOB_RECURSE SOURCES 
-    ${CMAKE_SOURCE_DIR}/src/*.cpp
+# Collect library source files (excluding main files)
+set(LIB_SOURCES
+    ${CMAKE_SOURCE_DIR}/src/background.cpp
+    ${CMAKE_SOURCE_DIR}/src/calibration.cpp
+    ${CMAKE_SOURCE_DIR}/src/camera_interface.cpp
+    ${CMAKE_SOURCE_DIR}/src/detection.cpp
+    ${CMAKE_SOURCE_DIR}/src/tracker.cpp
 )
 
-# Build the executable
-add_executable(tcc ${SOURCES})
+# Build the main application executable
+add_executable(tcc 
+    ${CMAKE_SOURCE_DIR}/src/main_app.cpp
+    ${LIB_SOURCES}
+)
 
-# Link libraries
+# Link libraries for main app
 target_link_libraries(tcc PRIVATE
+    PkgConfig::LIBCAMERA
+    Threads::Threads
+    ${OpenCV_LIBS}
+    Eigen3::Eigen
+)
+
+# Build the test executable
+add_executable(tcc_camera_test 
+    ${CMAKE_SOURCE_DIR}/src/test_main.cpp
+    ${LIB_SOURCES}
+)
+
+# Link libraries for test
+target_link_libraries(tcc_camera_test PRIVATE
     PkgConfig::LIBCAMERA
     Threads::Threads
     ${OpenCV_LIBS}
@@ -45,8 +66,12 @@ target_compile_options(tcc PRIVATE
     -Wall -Wextra -Wpedantic
 )
 
+target_compile_options(tcc_camera_test PRIVATE
+    -Wall -Wextra -Wpedantic
+)
+
 # Print configuration info
 message(STATUS "OpenCV version: ${OpenCV_VERSION}")
 message(STATUS "libcamera cflags: ${LIBCAMERA_CFLAGS}")
 message(STATUS "libcamera libs: ${LIBCAMERA_LIBRARIES}")
-message(STATUS "Source files: ${SOURCES}")
+message(STATUS "Source files: ${LIB_SOURCES}")
