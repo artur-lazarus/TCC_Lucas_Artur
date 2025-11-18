@@ -139,3 +139,6 @@ def saveColor(frames, path):
     for frame in frames:
         out.write(frame)
     out.release()
+    
+if __name__ == "__main__":
+    frames = loadVideo("assets/video.avi", max_frames=30000, )

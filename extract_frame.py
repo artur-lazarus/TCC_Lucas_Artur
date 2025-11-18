@@ -1,69 +1,42 @@
 import cv2
-import sys
 
-def extract_frame(video_path, frame_number, output_path, mask_path):
-    """
-    Extract a specific frame from a video file.
+def save_video_portion(n_frames, path):
+    cap = cv2.VideoCapture(path)
     
-    Args:
-        video_path: Path to the input video file
-        frame_number: Frame number to extract (0-indexed)
-        output_path: Path to save the extracted frame
-    """
-    # Open the video file
-    cap = cv2.VideoCapture(video_path)
-    
+    # Check if video opened successfully FIRST
     if not cap.isOpened():
-        print(f"Error: Could not open video file {video_path}")
-        return False
+        print("Error: Could not open video.")
+        return None
     
-    # Get video properties
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    
-    print(f"Video properties:")
-    print(f"  Total frames: {total_frames}")
-    print(f"  FPS: {fps}")
-    print(f"  Duration: {total_frames/fps:.2f} seconds")
-    
-    # Check if frame number is valid
-    if frame_number >= total_frames:
-        print(f"Error: Frame {frame_number} is out of range (video has {total_frames} frames)")
-        cap.release()
-        return False
-    
-    # Set the frame position
-    cap.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
-    
-    # Read the frame
+    # Read first frame to get dimensions
     ret, frame = cap.read()
-    
     if not ret:
-        print(f"Error: Could not read frame {frame_number}")
-        cap.release()
-        return False
+        print("Error: Could not read first frame.")
+        return None
     
-    mask = cv2.imread(mask_path)
-    final_image = cv2.bitwise_and(frame, mask)
+    # Determine if frame is color or grayscale
+    is_color = len(frame.shape) == 3
     
-    # Save the frame
-    success = cv2.imwrite(output_path, final_image)
+    # Set up VideoWriter with correct color setting
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    out = cv2.VideoWriter("session1_right.mp4", fourcc, 50.0, 
+                          (frame.shape[1], frame.shape[0]), isColor=is_color)
     
-    if success:
-        print(f"Successfully extracted frame {frame_number} to {output_path}")
-        print(f"Frame dimensions: {frame.shape[1]}x{frame.shape[0]}")
-    else:
-        print(f"Error: Could not save frame to {output_path}")
+    # Write the first frame
+    out.write(frame)
     
-    # Release the video capture object
+    # Write remaining frames
+    for i in range(1, n_frames):
+        if i % 100 == 0:
+            print(f"Frame {i}")
+        ret, frame = cap.read()
+        if not ret:
+            break
+        out.write(frame)
+    
     cap.release()
+    out.release()
+    print(f"Video saved successfully with {i} frames")
     
-    return success
-
 if __name__ == "__main__":
-    video_path = "assets/video.avi"
-    frame_number = 550
-    mask_path = "assets/video_mask.png"
-    output_path = "assets/frame_280.png"
-    
-    extract_frame(video_path, frame_number, output_path, mask_path)
+    save_video_portion(50000, "assets/video.avi")
