@@ -47,7 +47,7 @@ class Detection:
             cv2.line(calibrated_frame, (0, lane_y), (self.W_out, lane_y), (0), 1)
         
         calibrated_frame_mask = self.fill_holes(self.background_subtract(calibrated_frame, threshold=16, normalize=True))
-        output_image, bboxes, areas = self.detect_blobs(calibrated_frame_mask, min_area=min_car_area, draw_boxes=True)
+        output_image, bboxes, areas = detect_blobs(calibrated_frame_mask, min_area=min_car_area, draw_boxes=True)
         BL_corners = [(bbox[0], bbox[1]+bbox[3]) for bbox in bboxes] # (x, y+h)
 
         self.tracker.update(BL_corners, frame_count)
@@ -61,32 +61,6 @@ class Detection:
             return frame_vis
         else:
             return None
-
-    
-    def detect_blobs(self, mask, min_area, max_area=None, draw_boxes=True):
-        output_img = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
-        num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(mask, connectivity=8)
-        valid_bboxes, valid_areas = [], []
-        for i in range(1, num_labels):
-            area = stats[i, cv2.CC_STAT_AREA]
-            if area >= min_area and (max_area is None or area <= max_area):
-                x, y, w, h = stats[i, cv2.CC_STAT_LEFT], stats[i, cv2.CC_STAT_TOP], stats[i, cv2.CC_STAT_WIDTH], stats[i, cv2.CC_STAT_HEIGHT]
-                valid_bboxes.append((x, y, w, h))
-                valid_areas.append(area)
-        for bbox in valid_bboxes:
-            x, y, w, h = bbox   
-            if draw_boxes:
-                cv2.rectangle(mask, (x, y), (x + w, y + h), (0, 255, 0), 2)
-        return output_img, valid_bboxes, valid_areas
-
-    def detect_blobs_multiple(self, masks, min_area, max_area=None, draw_boxes=True):
-        output_images, all_bboxes, all_areas = [], [], []
-        for mask in masks:
-            output_img, valid_bboxes, valid_areas = self.detect_blobs(mask, min_area, max_area, draw_boxes)
-            output_images.append(output_img)
-            all_bboxes.append(valid_bboxes)
-            all_areas.append(valid_areas)
-        return output_images, all_bboxes, all_areas
     
 def _draw_track_trail(frame, track, max_len=25):
     """Draw a short trail of a track's recent positions."""
@@ -134,5 +108,30 @@ def fill_holes(mask):
         cv2.floodFill(im_flood, flood_mask, (0, 0), 255)
         im_flood_inv = cv2.bitwise_not(im_flood)
         return cv2.bitwise_or(mask, im_flood_inv)
+
+def detect_blobs(mask, min_area, max_area=None, draw_boxes=True):
+        output_img = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
+        num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(mask, connectivity=8)
+        valid_bboxes, valid_areas = [], []
+        for i in range(1, num_labels):
+            area = stats[i, cv2.CC_STAT_AREA]
+            if area >= min_area and (max_area is None or area <= max_area):
+                x, y, w, h = stats[i, cv2.CC_STAT_LEFT], stats[i, cv2.CC_STAT_TOP], stats[i, cv2.CC_STAT_WIDTH], stats[i, cv2.CC_STAT_HEIGHT]
+                valid_bboxes.append((x, y, w, h))
+                valid_areas.append(area)
+        for bbox in valid_bboxes:
+            x, y, w, h = bbox   
+            if draw_boxes:
+                cv2.rectangle(mask, (x, y), (x + w, y + h), (0, 255, 0), 2)
+        return output_img, valid_bboxes, valid_areas
+
+def detect_blobs_multiple(masks, min_area, max_area=None, draw_boxes=True):
+        output_images, all_bboxes, all_areas = [], [], []
+        for mask in masks:
+            output_img, valid_bboxes, valid_areas = detect_blobs(mask, min_area, max_area, draw_boxes)
+            output_images.append(output_img)
+            all_bboxes.append(valid_bboxes)
+            all_areas.append(valid_areas)
+        return output_images, all_bboxes, all_areas
     
     

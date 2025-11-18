@@ -1,6 +1,9 @@
 .vscode/
 .venv/
 build/
+lib/
+dataset/
+final_debug/
 *.DS_Store*
 video.avi
 __pycache__

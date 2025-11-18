@@ -13,7 +13,7 @@ logging.basicConfig(
     format='%(levelname)s: %(message)s'
 )
 
-def _find_vp_from_lines_diamond_space(lines, frame_shape, line_format):
+def _find_vp_from_lines_diamond_space(lines, frame_shape, line_format, reference_vp=None):
     """
     Finds vanishing point using DiamondSpace accumulator.
     
@@ -23,6 +23,8 @@ def _find_vp_from_lines_diamond_space(lines, frame_shape, line_format):
                - 'params': [(a, b, c), ...] from _fit_lines_to_tracks where ax + by + c = 0
         frame_shape: (height, width) of the frame
         line_format: 'segment' or 'params' to specify input format
+        reference_vp: Optional reference vanishing point (x, y) for horizontal opposition filtering.
+                     When provided, ensures returned VP is on opposite horizontal side of image center.
         
     Returns:
         Vanishing point as (x, y) tuple or None if failed
@@ -63,10 +65,43 @@ def _find_vp_from_lines_diamond_space(lines, frame_shape, line_format):
         logging.warning("DiamondSpace found no peaks")
         return None
     
-    best_peak_xy = p[0][:2].astype(np.float32)
-    logging.info(f"DiamondSpace found VP: {best_peak_xy} with weight {w[0]:.2f}")
-    
-    return best_peak_xy
+    # If reference_vp provided, filter peaks for horizontal opposition
+    if reference_vp is not None:
+        center_x = img_w / 2
+        ref_x = reference_vp[0]
+        
+        # Determine which side reference VP is on
+        ref_is_left = ref_x < center_x
+        
+        logging.info(f"Applying horizontal opposition filter:")
+        logging.info(f"  Image center x: {center_x:.1f}")
+        logging.info(f"  Reference VP x: {ref_x:.1f} ({'left' if ref_is_left else 'right'} of center)")
+        logging.info(f"  Looking for VP on {'right' if ref_is_left else 'left'} side")
+        
+        # Find first peak on opposite side
+        for i, (peak, weight) in enumerate(zip(p, w)):
+            peak_x = peak[0]
+            peak_is_left = peak_x < center_x
+            
+            # Check if peak is on opposite side from reference
+            if ref_is_left and not peak_is_left:  # ref is left, peak is right
+                logging.info(f"  Peak {i}: x={peak_x:.1f} (right) - ACCEPTED with weight {weight:.2f}")
+                best_peak_xy = peak[:2].astype(np.float32)
+                return best_peak_xy
+            elif not ref_is_left and peak_is_left:  # ref is right, peak is left
+                logging.info(f"  Peak {i}: x={peak_x:.1f} (left) - ACCEPTED with weight {weight:.2f}")
+                best_peak_xy = peak[:2].astype(np.float32)
+                return best_peak_xy
+            else:
+                logging.info(f"  Peak {i}: x={peak_x:.1f} ({'left' if peak_is_left else 'right'}) - REJECTED (same side as reference)")
+        
+        logging.warning("No peaks found on opposite side of reference VP")
+        return None
+    else:
+        # No filtering, return best peak
+        best_peak_xy = p[0][:2].astype(np.float32)
+        logging.info(f"DiamondSpace found VP: {best_peak_xy} with weight {w[0]:.2f}")
+        return best_peak_xy
 
 # =============================================================================
 # VP-U (Road Direction) Functions - KLT Tracking Based
@@ -296,6 +331,18 @@ def estimate_vp_u(min_valid_lines_to_stop=200, show_video=False):
     
     if vp_u is not None:
         logging.info(f"VP-u estimated: {tuple(vp_u)}")
+        
+        # Visualize supporting lines if show_video is enabled
+        if show_video:
+            _visualize_supporting_lines(
+                vp=vp_u,
+                all_lines=all_valid_lines,
+                line_format='params',
+                frame_shape=frame_shape,
+                vp_name='u',
+                output_prefix='vp_u'
+            )
+        
         return tuple(vp_u)
     
     return None
@@ -356,62 +403,278 @@ def _filter_lines_by_vp(lines, vp_u, angle_threshold_deg=60):
     return filtered
 
 
-def _estimate_plate_angle_from_aspect_ratio(plate_box, known_ratio=5.0):
+def _detect_plate_edges_with_hough(frame, grad_mag_norm, plate_box, min_length_ratio=0.90):
     """
-    Estimates plate orientation from aspect ratio (520mm x 110mm ≈ 5:1).
-    Returns (angles_list, bbox_aspect) or (None, None).
+    Detects plate edges using HoughLinesP on the gradient within the plate region.
+    
+    Args:
+        frame: Original grayscale frame
+        grad_mag_norm: Normalized gradient magnitude (0-255)
+        plate_box: Plate bounding box as (x1, y1, x2, y2)
+        min_length_ratio: Minimum line length as ratio of plate width (default: 0.95)
+        
+    Returns:
+        detected_lines: List of line segments in frame coordinates [(x1, y1, x2, y2), ...]
+        detected_angles: List of angles in radians for each line
+        plate_edges: Thresholded gradient (wireframe) of the plate region
     """
-    x1, y1, x2, y2 = plate_box
-    bbox_width = x2 - x1
-    bbox_height = y2 - y1
+    x1, y1, x2, y2 = map(int, plate_box)
+    plate_width = x2 - x1
+    plate_height = y2 - y1
     
-    if bbox_width <= 0 or bbox_height <= 0:
-        return None, None
+    if plate_width <= 0 or plate_height <= 0:
+        return [], [], None
     
-    bbox_aspect = bbox_width / bbox_height
+    # Extract plate region from gradient
+    plate_grad = grad_mag_norm[y1:y2, x1:x2]
     
-    if bbox_aspect >= known_ratio:
-        return [0.0], bbox_aspect
+    # Threshold the gradient to get edges
+    _, plate_edges = cv2.threshold(plate_grad, 50, 255, cv2.THRESH_BINARY)
     
-    theta = np.arcsin(bbox_aspect / known_ratio)
-    angle1 = theta
-    angle2 = np.pi - theta
+    # Run HoughLinesP to detect line segments directly
+    min_line_length = int(min_length_ratio * plate_width)
+    lines = cv2.HoughLinesP(plate_edges, rho=1, theta=np.pi/180, threshold=int(plate_width * 0.3),
+                            minLineLength=min_line_length, maxLineGap=1)
     
-    return [angle1, angle2], bbox_aspect
-
-
-def _get_plate_angle(plate_boxes):
-    """Calculates possible angles from detected plate boxes."""
-    for box in plate_boxes:
-        angles, bbox_aspect = _estimate_plate_angle_from_aspect_ratio(box, known_ratio=5.0)
-        if angles is not None and len(angles) > 0:
-            return angles, bbox_aspect, box
-    return None, None, None
-
-
-def _filter_lines_by_plate_angles(lines, target_angles, angle_tolerance_deg=15):
-    """Keeps only lines close to target angles from plate detection."""
-    filtered = []
-    tolerance_rad = np.deg2rad(angle_tolerance_deg)
+    if lines is None:
+        return [], [], plate_edges
+    
+    detected_lines = []
+    detected_angles = []
     
     for line in lines:
-        x1, y1, x2, y2 = line
-        dx = x2 - x1
-        dy = y2 - y1
-        if dx == 0 and dy == 0:
+        x1_local, y1_local, x2_local, y2_local = line[0]
+        
+        # Convert back to frame coordinates
+        x1_frame = x1_local + x1
+        y1_frame = y1_local + y1
+        x2_frame = x2_local + x1
+        y2_frame = y2_local + y1
+        
+        detected_lines.append((x1_frame, y1_frame, x2_frame, y2_frame))
+        
+        # Calculate angle (normalized to [0, pi))
+        dx = x2_frame - x1_frame
+        dy = y2_frame - y1_frame
+        angle = np.arctan2(dy, dx) % np.pi
+        detected_angles.append(angle)
+    
+    return detected_lines, detected_angles, plate_edges
+
+
+def _get_plate_angle_from_hough(frame, grad_mag_norm, plate_boxes, min_length_ratio=0.90):
+    """
+    Extracts plate angles from HoughLinesP detection on plate regions.
+    
+    Args:
+        frame: Original grayscale frame
+        grad_mag_norm: Normalized gradient magnitude
+        plate_boxes: List of detected plate bounding boxes
+        min_length_ratio: Minimum line length as ratio of plate width
+        
+    Returns:
+        detected_angles: List of detected angles from plate edges (radians)
+        plate_lines: List of detected line segments
+        plate_box: The plate box that was analyzed
+        all_wireframes: List of (box, wireframe) tuples for all processed plates
+    """
+    all_wireframes = []
+    
+    for box in plate_boxes:
+        x1, y1, x2, y2 = box
+        bbox_width = x2 - x1
+        bbox_height = y2 - y1
+        
+        if bbox_width <= 0 or bbox_height <= 0:
             continue
         
-        line_angle = np.arctan2(dy, dx) % np.pi
+        # Run HoughLinesP on this plate
+        plate_lines, detected_angles, wireframe = _detect_plate_edges_with_hough(
+            frame, grad_mag_norm, box, min_length_ratio=min_length_ratio
+        )
         
-        for target_angle in target_angles:
-            angle_diff = line_angle - target_angle
-            angle_diff = (angle_diff + np.pi/2) % np.pi - np.pi/2
-            
-            if np.abs(angle_diff) <= tolerance_rad:
-                filtered.append(line)
-                break
+        # Store wireframe for all plates
+        if wireframe is not None:
+            all_wireframes.append((box, wireframe))
+        
+        if len(detected_angles) > 0:
+            logging.info(f"Detected {len(detected_angles)} plate edges with HoughLinesP (>={min_length_ratio*100:.0f}% of plate width)")
+            return detected_angles, plate_lines, box, all_wireframes
     
-    return filtered
+    return None, None, None, all_wireframes
+
+
+def _find_supporting_lines(lines, vp, support_max_dist_px=5.0, line_format='segment'):
+    """
+    Filters lines to return only those that "support" the vanishing point.
+    
+    Args:
+        lines: List of lines in one of two formats:
+               - 'segment': [(x1, y1, x2, y2), ...] from HoughLinesP
+               - 'params': [(a, b, c), ...] from _fit_lines_to_tracks where ax + by + c = 0
+        vp: Vanishing point as (x, y) tuple
+        support_max_dist_px: Maximum distance in pixels for a line to be considered supporting
+        line_format: 'segment' or 'params' to specify input format
+        
+    Returns:
+        List of supporting lines in the same format as input
+    """
+    logging.info(f"Finding supporting lines for VP {vp} (distance < {support_max_dist_px}px)...")
+    supporting = []
+    
+    if vp is None:
+        return supporting
+    
+    xv, yv = vp
+    
+    for line in lines:
+        if line_format == 'segment':
+            x1, y1, x2, y2 = line
+            # Convert to (A, B, C) format for distance calculation
+            A = y2 - y1
+            B = x1 - x2
+            C = x2 * y1 - x1 * y2
+        elif line_format == 'params':
+            A, B, C = line
+        else:
+            logging.error(f"Unknown line_format: {line_format}")
+            continue
+        
+        # Calculate distance from point (xv, yv) to line Ax + By + C = 0
+        denominator = np.sqrt(A**2 + B**2)
+        if denominator == 0:
+            continue
+        
+        distance = abs(A * xv + B * yv + C) / denominator
+        
+        if distance <= support_max_dist_px:
+            supporting.append(line)
+    
+    logging.info(f"Found {len(supporting)} supporting lines out of {len(lines)}.")
+    return supporting
+
+
+def _visualize_supporting_lines(vp, all_lines, line_format, frame_shape, vp_name, output_prefix):
+    """
+    Visualizes and saves supporting lines for a vanishing point.
+    
+    Args:
+        vp: Vanishing point as (x, y) tuple
+        all_lines: List of all lines used to calculate the VP
+        line_format: 'segment' or 'params' to specify line format
+        frame_shape: (height, width) of the frame
+        vp_name: Name of the vanishing point (e.g., 'u' or 'v')
+        output_prefix: Prefix for output files (e.g., 'vp_u' or 'vp_v')
+    """
+    output_dir = 'test_output/vp_debug'
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Get a frame from video for visualization
+    frame_count, frame = video.get_frame()
+    if frame is None:
+        logging.warning("Could not get frame for supporting lines visualization")
+        return
+    
+    # Convert to BGR for visualization
+    if len(frame.shape) == 2:
+        vis_frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+    else:
+        vis_frame = frame.copy()
+    
+    frame_h, frame_w = frame_shape
+    
+    # Calculate distance threshold as 3% of VP distance from image center
+    center_x, center_y = frame_w / 2, frame_h / 2
+    vp_distance_from_center = np.sqrt((vp[0] - center_x)**2 + (vp[1] - center_y)**2)
+    support_threshold = 0.03 * vp_distance_from_center
+    logging.info(f"Using support threshold: {support_threshold:.2f}px (3% of VP-{vp_name} distance from center: {vp_distance_from_center:.2f}px)")
+    
+    # Find supporting lines
+    supporting_lines = _find_supporting_lines(all_lines, vp, support_max_dist_px=support_threshold, line_format=line_format)
+    
+    # Draw supporting lines
+    for line in supporting_lines:
+        if line_format == 'segment':
+            x1, y1, x2, y2 = line
+        elif line_format == 'params':
+            # Convert from (a, b, c) to segment for drawing
+            # We need to find two points on the line within the frame
+            a, b, c = line
+            
+            # Find intersections with frame boundaries
+            points = []
+            
+            # Check intersection with top edge (y=0)
+            if b != 0:
+                x = -c / a if a != 0 else 0
+                if 0 <= x <= frame_w:
+                    points.append((int(x), 0))
+            
+            # Check intersection with bottom edge (y=frame_h)
+            if b != 0:
+                x = -(c + b * frame_h) / a if a != 0 else 0
+                if 0 <= x <= frame_w:
+                    points.append((int(x), frame_h))
+            
+            # Check intersection with left edge (x=0)
+            if a != 0:
+                y = -c / b if b != 0 else 0
+                if 0 <= y <= frame_h:
+                    points.append((0, int(y)))
+            
+            # Check intersection with right edge (x=frame_w)
+            if a != 0:
+                y = -(c + a * frame_w) / b if b != 0 else 0
+                if 0 <= y <= frame_h:
+                    points.append((frame_w, int(y)))
+            
+            # Remove duplicates and take first two points
+            points = list(set(points))
+            if len(points) >= 2:
+                x1, y1 = points[0]
+                x2, y2 = points[1]
+            else:
+                continue
+        
+        # Extend line for better visualization
+        dx = x2 - x1
+        dy = y2 - y1
+        length = np.sqrt(dx**2 + dy**2)
+        if length == 0:
+            continue
+        
+        # Normalize direction
+        dx_norm = dx / length
+        dy_norm = dy / length
+        
+        # Extend line by a factor
+        extension_factor = 1.0
+        
+        # Calculate extended endpoints
+        x1_ext = int(x1 - dx_norm * length * extension_factor)
+        y1_ext = int(y1 - dy_norm * length * extension_factor)
+        x2_ext = int(x2 + dx_norm * length * extension_factor)
+        y2_ext = int(y2 + dy_norm * length * extension_factor)
+        
+        # Draw extended line in blue
+        cv2.line(vis_frame, (x1_ext, y1_ext), (x2_ext, y2_ext), (255, 0, 0), 2)
+    
+    # Add text overlay
+    cv2.putText(vis_frame, f"VP-{vp_name} Supporting Lines: {len(supporting_lines)}", 
+               (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+    cv2.putText(vis_frame, f"VP-{vp_name}: ({vp[0]:.1f}, {vp[1]:.1f})", 
+               (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+    
+    # Save the visualization
+    output_path = os.path.join(output_dir, f'{output_prefix}_supporting_lines.jpg')
+    cv2.imwrite(output_path, vis_frame)
+    logging.info(f"Saved supporting lines visualization to: {output_path}")
+    
+    # Display the visualization
+    cv2.imshow(f"VP-{vp_name} Supporting Lines", vis_frame)
+    logging.info(f"Displaying VP-{vp_name} supporting lines. Press any key to continue...")
+    cv2.waitKey(0)
+    cv2.destroyAllWindows()
 
 
 def estimate_vp_v(vp_u, plate_detector, show_video=False):
@@ -445,7 +708,7 @@ def estimate_vp_v(vp_u, plate_detector, show_video=False):
     
     # Phase tracking
     collected_plate_angles = []
-    required_good_plates = 10
+    required_good_plates = 5
     good_plate_count = 0
     required_filtered_lines = 2000
     accumulated_filtered_lines = []
@@ -455,6 +718,8 @@ def estimate_vp_v(vp_u, plate_detector, show_video=False):
     
     while good_plate_count < required_good_plates:
         frame_count, frame = video.get_frame_background_subtracted()
+        cv2.imshow("Background Subtracted Frame", frame)
+        cv2.waitKey(1)
         if frame is None:
             continue
         
@@ -480,7 +745,23 @@ def estimate_vp_v(vp_u, plate_detector, show_video=False):
                 cv2.waitKey(1)
             continue
         
-        plate_angles, bbox_aspect, plate_box = _get_plate_angle(plate_boxes)
+        # Compute gradient for HoughLinesP detection
+        grad_x = cv2.Sobel(frame, cv2.CV_32F, 1, 0, ksize=3)
+        grad_y = cv2.Sobel(frame, cv2.CV_32F, 0, 1, ksize=3)
+        grad_mag = np.sqrt(grad_x**2 + grad_y**2)
+        grad_mag_norm = cv2.normalize(grad_mag, None, 0, 255, cv2.NORM_MINMAX, cv2.CV_8U)
+        
+        # Extract angles using HoughLinesP on plate edges
+        plate_angles, plate_lines, plate_box, all_wireframes = _get_plate_angle_from_hough(
+            frame, grad_mag_norm, plate_boxes, min_length_ratio=0.90
+        )
+        
+        # Save wireframes for all detected plates
+        if show_video and all_wireframes:
+            for idx, (box, wireframe) in enumerate(all_wireframes):
+                if wireframe is not None:
+                    wireframe_path = f'test_output/vp_debug/plate_wireframe_{frame_count:06d}_{idx:02d}.png'
+                    cv2.imwrite(wireframe_path, wireframe)
         
         if plate_angles is None:
             if show_video:
@@ -489,7 +770,7 @@ def estimate_vp_v(vp_u, plate_detector, show_video=False):
                 for box in plate_boxes:
                     x1, y1, x2, y2 = map(int, box)
                     cv2.rectangle(vis_frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
-                cv2.putText(vis_frame, f"Phase 1: Plates {good_plate_count}/{required_good_plates} (Invalid aspect)", 
+                cv2.putText(vis_frame, f"Phase 1: Plates {good_plate_count}/{required_good_plates} (No edges detected)", 
                            (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
                 if video_writer_phase1 is not None:
                     video_writer_phase1.write(vis_frame)
@@ -497,7 +778,7 @@ def estimate_vp_v(vp_u, plate_detector, show_video=False):
                 cv2.waitKey(1)
             continue
         
-        collected_plate_angles.extend(plate_angles)
+        collected_plate_angles.append(plate_angles)
         good_plate_count += 1
         
         if show_video:
@@ -506,19 +787,50 @@ def estimate_vp_v(vp_u, plate_detector, show_video=False):
             for box in plate_boxes:
                 x1, y1, x2, y2 = map(int, box)
                 cv2.rectangle(vis_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-            # Highlight the used plate
+            
+            # Highlight the used plate and draw detected edges
             if plate_box is not None:
                 x1, y1, x2, y2 = map(int, plate_box)
                 cv2.rectangle(vis_frame, (x1, y1), (x2, y2), (0, 255, 255), 3)
-                cv2.putText(vis_frame, f"Aspect: {bbox_aspect:.2f}", 
-                           (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
+                
+                # Draw detected plate edge lines (magenta)
+                if plate_lines is not None:
+                    for line in plate_lines:
+                        lx1, ly1, lx2, ly2 = map(int, line)
+                        cv2.line(vis_frame, (lx1, ly1), (lx2, ly2), (255, 0, 255), 2)
+                
+                # Display number of detected edges
+                cv2.putText(vis_frame, f"Edges: {len(plate_angles)}", 
+                           (x1, y2+20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 2)
+                
+                # Save individual plate image with detected edges
+                plate_crop = vis_frame[y1:y2, x1:x2].copy()
+                if plate_crop.size > 0:
+                    # Add angle information to the crop
+                    plate_h, plate_w = plate_crop.shape[:2]
+                    info_img = np.zeros((60, plate_w, 3), dtype=np.uint8)
+                    
+                    # Add angle text for each detected edge
+                    y_offset = 20
+                    for i, angle in enumerate(plate_angles):
+                        angle_deg = np.rad2deg(angle)
+                        text = f"Edge {i+1}: {angle_deg:.1f} deg"
+                        cv2.putText(info_img, text, (5, y_offset), 
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+                        y_offset += 15
+                    
+                    # Combine plate crop with info
+                    plate_with_info = np.vstack([plate_crop, info_img])
+                    
+                    # Save plate image
+                    plate_output_path = f'test_output/vp_debug/plate_{good_plate_count:02d}_edges.png'
+                    cv2.imwrite(plate_output_path, plate_with_info)
+                    logging.info(f"Saved plate {good_plate_count} with {len(plate_angles)} edges to: {plate_output_path}")
+            
             cv2.putText(vis_frame, f"Phase 1: Plates {good_plate_count}/{required_good_plates}", 
                        (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
             if video_writer_phase1 is not None:
                 video_writer_phase1.write(vis_frame)
-            # Save periodic snapshots
-            if good_plate_count % 2 == 0:
-                cv2.imwrite(f'test_output/vp_debug/vp_v_phase1_plate_{good_plate_count:02d}.png', vis_frame)
             cv2.imshow("Phase 1: Plate Detection", vis_frame)
             cv2.waitKey(1)
     
@@ -533,8 +845,10 @@ def estimate_vp_v(vp_u, plate_detector, show_video=False):
     
     # Phase 2: Line Detection with Filtering
     logging.info(f"\nPhase 2: Line detection with dual filtering...")
-    logging.info(f"Using plate angles: {[f'{np.rad2deg(a):.1f}°' for a in collected_plate_angles]}")
-        
+    
+    # Flatten all detected angles from all plates
+    all_plate_angles = [angle for angles_list in collected_plate_angles for angle in angles_list]
+    logging.info(f"Total plate edge angles collected: {len(all_plate_angles)}")
     
     while len(accumulated_filtered_lines) < required_filtered_lines:
         frame_count, frame = video.get_frame()
@@ -553,11 +867,32 @@ def estimate_vp_v(vp_u, plate_detector, show_video=False):
         # Detect lines
         wireframe, raw_lines = _find_lines_with_hough(frame, gradient_threshold=50)
         
-        # Apply dual filtering
+        # Filter by VP-u first
         vp_filtered = _filter_lines_by_vp(raw_lines, vp_u, angle_threshold_deg=45)
-        dual_filtered = _filter_lines_by_plate_angles(vp_filtered, collected_plate_angles, angle_tolerance_deg=15)
         
-        accumulated_filtered_lines.extend(dual_filtered)
+        # Filter by plate angles - keep lines matching any detected plate angle
+        angle_filtered = []
+        tolerance_rad = np.deg2rad(7)
+        
+        for line in vp_filtered:
+            x1, y1, x2, y2 = line
+            dx = x2 - x1
+            dy = y2 - y1
+            if dx == 0 and dy == 0:
+                continue
+            
+            line_angle = np.arctan2(dy, dx) % np.pi
+            
+            # Check if line matches any of the detected plate angles
+            for plate_angle in all_plate_angles:
+                angle_diff = line_angle - plate_angle
+                angle_diff = (angle_diff + np.pi/2) % np.pi - np.pi/2
+                
+                if np.abs(angle_diff) <= tolerance_rad:
+                    angle_filtered.append(line)
+                    break
+        
+        accumulated_filtered_lines.extend(angle_filtered)
         
         if show_video:
             vis_frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
@@ -566,7 +901,7 @@ def estimate_vp_v(vp_u, plate_detector, show_video=False):
                 cv2.line(vis_frame, (x1, y1), (x2, y2), (0, 255, 0), 1)
             cv2.putText(vis_frame, f"Phase 2: Lines {len(accumulated_filtered_lines)}/{required_filtered_lines}", 
                        (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-            cv2.putText(vis_frame, f"Frame: {frame_count} | This frame: {len(dual_filtered)}", 
+            cv2.putText(vis_frame, f"Frame: {frame_count} | This frame: {len(angle_filtered)}", 
                        (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
             
             # Write to video
@@ -591,12 +926,29 @@ def estimate_vp_v(vp_u, plate_detector, show_video=False):
         logging.error("No valid lines after filtering")
         return None
     
-    # Calculate VP-v using 'segment' format (lines are in (x1, y1, x2, y2) format from HoughLinesP)
+    # Calculate VP-v using 'segment' format with horizontal opposition filter
+    # VP-v must be on opposite side of image center from VP-u
     canvas_shape = frame.shape[:2]
-    vp_v = _find_vp_from_lines_diamond_space(accumulated_filtered_lines, canvas_shape, 'segment')
+    vp_v = _find_vp_from_lines_diamond_space(
+        accumulated_filtered_lines, 
+        canvas_shape, 
+        'segment',
+        reference_vp=vp_u
+    )
     
     if vp_v is not None:
         logging.info(f"VP-v estimated: {vp_v}")
+        
+        # Visualize supporting lines if show_video is enabled
+        if show_video:
+            _visualize_supporting_lines(
+                vp=vp_v,
+                all_lines=accumulated_filtered_lines,
+                line_format='segment',
+                frame_shape=canvas_shape,
+                vp_name='v',
+                output_prefix='vp_v'
+            )
     
     return vp_v
 

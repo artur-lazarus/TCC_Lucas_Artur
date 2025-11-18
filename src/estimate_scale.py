@@ -382,7 +382,7 @@ def estimate_scale(vp1, vp2, vp3, show_video=False):
     global VP1, VP2, VP3, H
     
     VP1, VP2, VP3, H = vp1, vp2, vp3, video.H_matrix
-    min_measurements = 5
+    min_measurements = 100
     
     logging.info(f"Collecting {min_measurements} width measurements for scale estimation")
     
