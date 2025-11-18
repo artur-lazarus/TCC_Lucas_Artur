@@ -455,6 +455,8 @@ def estimate_vp_v(vp_u, plate_detector, show_video=False):
     
     while good_plate_count < required_good_plates:
         frame_count, frame = video.get_frame_background_subtracted()
+        cv2.imshow("Background Subtracted Frame", frame)
+        cv2.waitKey(1)
         if frame is None:
             continue
         

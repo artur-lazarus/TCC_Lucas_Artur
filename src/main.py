@@ -68,7 +68,7 @@ def main():
     cpp_file = "cpp/src/tcc"
 
     time0 = time.perf_counter()
-    input_video_path = "dataset/session1_right/video.avi"
+    input_video_path = "dataset/session2_left/video.avi"
     json_calibration_path = "calibration.json"
     colour = False
     start_frame = 100
@@ -101,7 +101,7 @@ def main():
 
     # Calibration
     print(f"Initial background population time: {time3 - time2:.3f} seconds")
-    H_matrix, roi_polygon, H_out, W_out, lanes_y_pxs, scale_lambda, calibration_background_object = calibration.calibrate()
+    H_matrix, roi_polygon, H_out, W_out, lanes_y_pxs, scale_lambda, calibration_background_object = calibration.calibrate(show_video=True)
     time4 = time.perf_counter()
     print(f"Calibration computation time: {time4 - time3:.3f} seconds")
 
