@@ -296,6 +296,18 @@ def estimate_vp_u(min_valid_lines_to_stop=200, show_video=False):
     
     if vp_u is not None:
         logging.info(f"VP-u estimated: {tuple(vp_u)}")
+        
+        # Visualize supporting lines if show_video is enabled
+        if show_video:
+            _visualize_supporting_lines(
+                vp=vp_u,
+                all_lines=all_valid_lines,
+                line_format='params',
+                frame_shape=frame_shape,
+                vp_name='u',
+                output_prefix='vp_u'
+            )
+        
         return tuple(vp_u)
     
     return None
@@ -412,6 +424,179 @@ def _filter_lines_by_plate_angles(lines, target_angles, angle_tolerance_deg=15):
                 break
     
     return filtered
+
+
+def _find_supporting_lines(lines, vp, support_max_dist_px=5.0, line_format='segment'):
+    """
+    Filters lines to return only those that "support" the vanishing point.
+    
+    Args:
+        lines: List of lines in one of two formats:
+               - 'segment': [(x1, y1, x2, y2), ...] from HoughLinesP
+               - 'params': [(a, b, c), ...] from _fit_lines_to_tracks where ax + by + c = 0
+        vp: Vanishing point as (x, y) tuple
+        support_max_dist_px: Maximum distance in pixels for a line to be considered supporting
+        line_format: 'segment' or 'params' to specify input format
+        
+    Returns:
+        List of supporting lines in the same format as input
+    """
+    logging.info(f"Finding supporting lines for VP {vp} (distance < {support_max_dist_px}px)...")
+    supporting = []
+    
+    if vp is None:
+        return supporting
+    
+    xv, yv = vp
+    
+    for line in lines:
+        if line_format == 'segment':
+            x1, y1, x2, y2 = line
+            # Convert to (A, B, C) format for distance calculation
+            A = y2 - y1
+            B = x1 - x2
+            C = x2 * y1 - x1 * y2
+        elif line_format == 'params':
+            A, B, C = line
+        else:
+            logging.error(f"Unknown line_format: {line_format}")
+            continue
+        
+        # Calculate distance from point (xv, yv) to line Ax + By + C = 0
+        denominator = np.sqrt(A**2 + B**2)
+        if denominator == 0:
+            continue
+        
+        distance = abs(A * xv + B * yv + C) / denominator
+        
+        if distance <= support_max_dist_px:
+            supporting.append(line)
+    
+    logging.info(f"Found {len(supporting)} supporting lines out of {len(lines)}.")
+    return supporting
+
+
+def _visualize_supporting_lines(vp, all_lines, line_format, frame_shape, vp_name, output_prefix):
+    """
+    Visualizes and saves supporting lines for a vanishing point.
+    
+    Args:
+        vp: Vanishing point as (x, y) tuple
+        all_lines: List of all lines used to calculate the VP
+        line_format: 'segment' or 'params' to specify line format
+        frame_shape: (height, width) of the frame
+        vp_name: Name of the vanishing point (e.g., 'u' or 'v')
+        output_prefix: Prefix for output files (e.g., 'vp_u' or 'vp_v')
+    """
+    output_dir = 'test_output/vp_debug'
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Get a frame from video for visualization
+    frame_count, frame = video.get_frame()
+    if frame is None:
+        logging.warning("Could not get frame for supporting lines visualization")
+        return
+    
+    # Convert to BGR for visualization
+    if len(frame.shape) == 2:
+        vis_frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+    else:
+        vis_frame = frame.copy()
+    
+    frame_h, frame_w = frame_shape
+    
+    # Calculate distance threshold as 3% of VP distance from image center
+    center_x, center_y = frame_w / 2, frame_h / 2
+    vp_distance_from_center = np.sqrt((vp[0] - center_x)**2 + (vp[1] - center_y)**2)
+    support_threshold = 0.03 * vp_distance_from_center
+    logging.info(f"Using support threshold: {support_threshold:.2f}px (3% of VP-{vp_name} distance from center: {vp_distance_from_center:.2f}px)")
+    
+    # Find supporting lines
+    supporting_lines = _find_supporting_lines(all_lines, vp, support_max_dist_px=support_threshold, line_format=line_format)
+    
+    # Draw supporting lines
+    for line in supporting_lines:
+        if line_format == 'segment':
+            x1, y1, x2, y2 = line
+        elif line_format == 'params':
+            # Convert from (a, b, c) to segment for drawing
+            # We need to find two points on the line within the frame
+            a, b, c = line
+            
+            # Find intersections with frame boundaries
+            points = []
+            
+            # Check intersection with top edge (y=0)
+            if b != 0:
+                x = -c / a if a != 0 else 0
+                if 0 <= x <= frame_w:
+                    points.append((int(x), 0))
+            
+            # Check intersection with bottom edge (y=frame_h)
+            if b != 0:
+                x = -(c + b * frame_h) / a if a != 0 else 0
+                if 0 <= x <= frame_w:
+                    points.append((int(x), frame_h))
+            
+            # Check intersection with left edge (x=0)
+            if a != 0:
+                y = -c / b if b != 0 else 0
+                if 0 <= y <= frame_h:
+                    points.append((0, int(y)))
+            
+            # Check intersection with right edge (x=frame_w)
+            if a != 0:
+                y = -(c + a * frame_w) / b if b != 0 else 0
+                if 0 <= y <= frame_h:
+                    points.append((frame_w, int(y)))
+            
+            # Remove duplicates and take first two points
+            points = list(set(points))
+            if len(points) >= 2:
+                x1, y1 = points[0]
+                x2, y2 = points[1]
+            else:
+                continue
+        
+        # Extend line for better visualization
+        dx = x2 - x1
+        dy = y2 - y1
+        length = np.sqrt(dx**2 + dy**2)
+        if length == 0:
+            continue
+        
+        # Normalize direction
+        dx_norm = dx / length
+        dy_norm = dy / length
+        
+        # Extend line by a factor
+        extension_factor = 1.0
+        
+        # Calculate extended endpoints
+        x1_ext = int(x1 - dx_norm * length * extension_factor)
+        y1_ext = int(y1 - dy_norm * length * extension_factor)
+        x2_ext = int(x2 + dx_norm * length * extension_factor)
+        y2_ext = int(y2 + dy_norm * length * extension_factor)
+        
+        # Draw extended line in blue
+        cv2.line(vis_frame, (x1_ext, y1_ext), (x2_ext, y2_ext), (255, 0, 0), 2)
+    
+    # Add text overlay
+    cv2.putText(vis_frame, f"VP-{vp_name} Supporting Lines: {len(supporting_lines)}", 
+               (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+    cv2.putText(vis_frame, f"VP-{vp_name}: ({vp[0]:.1f}, {vp[1]:.1f})", 
+               (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+    
+    # Save the visualization
+    output_path = os.path.join(output_dir, f'{output_prefix}_supporting_lines.jpg')
+    cv2.imwrite(output_path, vis_frame)
+    logging.info(f"Saved supporting lines visualization to: {output_path}")
+    
+    # Display the visualization
+    cv2.imshow(f"VP-{vp_name} Supporting Lines", vis_frame)
+    logging.info(f"Displaying VP-{vp_name} supporting lines. Press any key to continue...")
+    cv2.waitKey(0)
+    cv2.destroyAllWindows()
 
 
 def estimate_vp_v(vp_u, plate_detector, show_video=False):
@@ -599,6 +784,17 @@ def estimate_vp_v(vp_u, plate_detector, show_video=False):
     
     if vp_v is not None:
         logging.info(f"VP-v estimated: {vp_v}")
+        
+        # Visualize supporting lines if show_video is enabled
+        if show_video:
+            _visualize_supporting_lines(
+                vp=vp_v,
+                all_lines=accumulated_filtered_lines,
+                line_format='segment',
+                frame_shape=canvas_shape,
+                vp_name='v',
+                output_prefix='vp_v'
+            )
     
     return vp_v
 
