@@ -2,27 +2,35 @@ CALIBRATION PARAMETERS
 ==================================================
 
 Vanishing Points:
-  Road VP: (1958.11, -476.17)
-  Parallel VP: (-2408.50, 104.96)
+  Road VP: (2018.90, -576.65)
+  Parallel VP: (-2371.15, 136.05)
 
-Focal Length: 1708.82 px
+Focal Length: 1753.94 px
 
 K Matrix:
-[[     1708.8           0         960]
- [          0      1708.8         540]
+[[     1753.9           0         960]
+ [          0      1753.9         540]
  [          0           0           1]]
 
 Rotation Vectors:
-  r1 (road): [    0.44867    -0.45679     0.76814]
-  r2 (across): [   -0.88595    -0.11442     0.44944]
-  r3 (up): [   -0.11741    -0.88219    -0.45603]
+  r1 (road): [    0.45381    -0.47856     0.75168]
+  r2 (across): [   -0.87979    -0.10669     0.46323]
+  r3 (up): [   -0.14149    -0.87155    -0.46945]
 
 Homography Matrix:
-[[   0.095764    -0.22756      254.53]
- [   -0.23338    -0.13488      392.77]
- [ 6.8706e-05  0.00051626     0.11129]]
+[[   0.071576    -0.21513      198.99]
+ [   -0.19045    -0.10858      321.88]
+ [ 8.0671e-05  0.00049691     0.12368]]
 
-Output size: 1920 x 566
-ROI polygon: [[464, 482], [1232, 0], [1678, 0], [1016, 1078], [25, 1079], [128, 760]]
-Lane Y-pixels: [126, 298]
-Scale lambda: 0.021356 meters/pixel
+Output size: 1280 x 341 pixels
+Scale lambda: 0.024190 meters/pseudo-unit
+Ground plane bounds (pseudo-units):
+  X: [0.68, 4.32]
+  Y: [0.50, 1.47]
+Warped dimensions in meters:
+  Width: 0.09 m
+  Height: 0.02 m
+ROI polygon: [[1284, 0], [1690, 0], [1050, 1078], [466, 1078], [462, 1079], [534, 850]]
+Lane Y-pixels: [135, 245]
+
+Max width constraint: 40.00 meters

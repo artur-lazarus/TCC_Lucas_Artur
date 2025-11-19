@@ -219,7 +219,7 @@ def estimate_vp_u(min_valid_lines_to_stop=200, show_video=False):
     )
     
     first_frame_count, old_frame = video.get_frame()
-    if old_frame is None:
+    if old_frame is None or first_frame_count is None:
         logging.error("Could not read first frame")
         return None
     
@@ -246,7 +246,7 @@ def estimate_vp_u(min_valid_lines_to_stop=200, show_video=False):
     
     while True:
         frame_count, frame = video.get_frame()
-        if frame is None:
+        if frame is None or frame_count is None:
             break
         
         newly_completed_tracks = []
@@ -271,6 +271,23 @@ def estimate_vp_u(min_valid_lines_to_stop=200, show_video=False):
                 track = active_tracks[track_id]
                 
                 if st == 1:
+                    # Check if the tracked point is within the ROI mask
+                    x, y = int(pt_new[0, 0]), int(pt_new[0, 1])
+                    
+                    # Check if point is within frame bounds
+                    if 0 <= y < roi.shape[0] and 0 <= x < roi.shape[1]:
+                        # Check if point is within the mask (non-zero value means inside ROI)
+                        if roi[y, x] == 0:
+                            # Point moved outside the ROI, complete the track
+                            if len(track) > 1:
+                                newly_completed_tracks.append(track)
+                            continue
+                    else:
+                        # Point moved outside frame bounds, complete the track
+                        if len(track) > 1:
+                            newly_completed_tracks.append(track)
+                        continue
+                    
                     pt_old = track[-1]
                     displacement = np.linalg.norm(pt_new.ravel() - pt_old)
                     
@@ -319,7 +336,7 @@ def estimate_vp_u(min_valid_lines_to_stop=200, show_video=False):
                 video_writer.write(vis_frame)
             
             cv2.imshow('KLT Tracking for VP-u', vis_frame)
-            if cv2.waitKey(50) & 0xFF == ord('q'):
+            if cv2.waitKey(1) & 0xFF == ord('q'):
                 early_exit = True
                 break
         
@@ -368,15 +385,15 @@ def estimate_vp_u(min_valid_lines_to_stop=200, show_video=False):
         logging.info(f"VP-u estimated: {tuple(vp_u)}")
         
         # Visualize supporting lines if show_video is enabled
-        if show_video:
-            _visualize_supporting_lines(
-                vp=vp_u,
-                all_lines=all_valid_lines,
-                line_format='params',
-                frame_shape=frame_shape,
-                vp_name='u',
-                output_prefix='vp_u'
-            )
+        # if show_video:
+        #     _visualize_supporting_lines(
+        #         vp=vp_u,
+        #         all_lines=all_valid_lines,
+        #         line_format='params',
+        #         frame_shape=frame_shape,
+        #         vp_name='u',
+        #         output_prefix='vp_u'
+            # )
         
         return tuple(vp_u)
     
@@ -438,13 +455,13 @@ def _filter_lines_by_vp(lines, vp_u, angle_threshold_deg=60):
     return filtered
 
 
-def _detect_plate_edges_with_hough(frame, grad_mag_norm, plate_box, min_length_ratio=0.90):
+def _detect_plate_edges_with_hough(frame, plate_box, min_length_ratio=0.90):
     """
     Detects plate edges using HoughLinesP on the gradient within the plate region.
+    Computes gradient only for the cropped plate region.
     
     Args:
         frame: Original grayscale frame
-        grad_mag_norm: Normalized gradient magnitude (0-255)
         plate_box: Plate bounding box as (x1, y1, x2, y2)
         min_length_ratio: Minimum line length as ratio of plate width (default: 0.95)
         
@@ -452,19 +469,26 @@ def _detect_plate_edges_with_hough(frame, grad_mag_norm, plate_box, min_length_r
         detected_lines: List of line segments in frame coordinates [(x1, y1, x2, y2), ...]
         detected_angles: List of angles in radians for each line
         plate_edges: Thresholded gradient (wireframe) of the plate region
+        grad_mag_norm_crop: Normalized gradient magnitude of the plate region
     """
     x1, y1, x2, y2 = map(int, plate_box)
     plate_width = x2 - x1
     plate_height = y2 - y1
     
     if plate_width <= 0 or plate_height <= 0:
-        return [], [], None
+        return [], [], None, None
     
-    # Extract plate region from gradient
-    plate_grad = grad_mag_norm[y1:y2, x1:x2]
+    # Crop plate region from frame first
+    plate_crop = frame[y1:y2, x1:x2]
+    
+    # Compute gradient on the cropped plate
+    grad_x = cv2.Sobel(plate_crop, cv2.CV_32F, 1, 0, ksize=3)
+    grad_y = cv2.Sobel(plate_crop, cv2.CV_32F, 0, 1, ksize=3)
+    grad_mag = np.sqrt(grad_x**2 + grad_y**2)
+    grad_mag_norm_crop = cv2.normalize(grad_mag, None, 0, 255, cv2.NORM_MINMAX, cv2.CV_8U)
     
     # Threshold the gradient to get edges
-    _, plate_edges = cv2.threshold(plate_grad, 50, 255, cv2.THRESH_BINARY)
+    _, plate_edges = cv2.threshold(grad_mag_norm_crop, 50, 255, cv2.THRESH_BINARY)
     
     # Run HoughLinesP to detect line segments directly
     min_line_length = int(min_length_ratio * plate_width)
@@ -472,7 +496,7 @@ def _detect_plate_edges_with_hough(frame, grad_mag_norm, plate_box, min_length_r
                             minLineLength=min_line_length, maxLineGap=1)
     
     if lines is None:
-        return [], [], plate_edges
+        return [], [], plate_edges, grad_mag_norm_crop
     
     detected_lines = []
     detected_angles = []
@@ -495,16 +519,16 @@ def _detect_plate_edges_with_hough(frame, grad_mag_norm, plate_box, min_length_r
         logging.info(f"Detected plate angle: {angle}")
         detected_angles.append(angle)
     
-    return detected_lines, detected_angles, plate_edges
+    return detected_lines, detected_angles, plate_edges, grad_mag_norm_crop
 
 
-def _get_plate_angle_from_hough(frame, grad_mag_norm, plate_boxes, min_length_ratio=0.90):
+def _get_plate_angle_from_hough(frame, plate_boxes, min_length_ratio=0.90):
     """
     Extracts plate angles from HoughLinesP detection on plate regions.
+    Computes gradient separately for each plate.
     
     Args:
         frame: Original grayscale frame
-        grad_mag_norm: Normalized gradient magnitude
         plate_boxes: List of detected plate bounding boxes
         min_length_ratio: Minimum line length as ratio of plate width
         
@@ -512,9 +536,9 @@ def _get_plate_angle_from_hough(frame, grad_mag_norm, plate_boxes, min_length_ra
         detected_angles: List of detected angles from plate edges (radians)
         plate_lines: List of detected line segments
         plate_box: The plate box that was analyzed
-        all_wireframes: List of (box, wireframe) tuples for all processed plates
+        all_data: List of (box, wireframe, grad_mag_norm_crop) tuples for all processed plates
     """
-    all_wireframes = []
+    all_data = []
     
     for box in plate_boxes:
         x1, y1, x2, y2 = box
@@ -524,20 +548,20 @@ def _get_plate_angle_from_hough(frame, grad_mag_norm, plate_boxes, min_length_ra
         if bbox_width <= 0 or bbox_height <= 0:
             continue
         
-        # Run HoughLinesP on this plate
-        plate_lines, detected_angles, wireframe = _detect_plate_edges_with_hough(
-            frame, grad_mag_norm, box, min_length_ratio=min_length_ratio
+        # Run HoughLinesP on this plate (gradient computed inside)
+        plate_lines, detected_angles, wireframe, grad_mag_norm_crop = _detect_plate_edges_with_hough(
+            frame, box, min_length_ratio=min_length_ratio
         )
         
-        # Store wireframe for all plates
-        if wireframe is not None:
-            all_wireframes.append((box, wireframe))
+        # Store data for all plates
+        if wireframe is not None and grad_mag_norm_crop is not None:
+            all_data.append((box, wireframe, grad_mag_norm_crop))
         
         if len(detected_angles) > 0:
             logging.info(f"Detected {len(detected_angles)} plate edges with HoughLinesP (>={min_length_ratio*100:.0f}% of plate width)")
-            return detected_angles, plate_lines, box, all_wireframes
+            return detected_angles, plate_lines, box, all_data
     
-    return None, None, None, all_wireframes
+    return None, None, None, all_data
 
 
 def _find_supporting_lines(lines, vp, support_max_dist_px=5.0, line_format='segment'):
@@ -607,7 +631,7 @@ def _visualize_supporting_lines(vp, all_lines, line_format, frame_shape, vp_name
     
     # Get a frame from video for visualization
     frame_count, frame = video.get_frame()
-    if frame is None:
+    if frame is None or frame_count is None:
         logging.warning("Could not get frame for supporting lines visualization")
         return
     
@@ -713,71 +737,6 @@ def _visualize_supporting_lines(vp, all_lines, line_format, frame_shape, vp_name
     cv2.destroyAllWindows()
 
 
-def _filter_edgelet_by_angle_to_vp(edgelet, vp_plate, angle_threshold_deg=5):
-    """
-    Checks if a single edgelet passes the angle test with vpv_plate.
-    
-    Calculates angle between:
-    1. Line from furthest edgelet point to vp_plate
-    2. The edgelet line itself (from furthest to other point)
-    
-    Args:
-        edgelet: Single line segment (x1, y1, x2, y2)
-        vp_plate: VP-v from plate edges as (x, y) tuple
-        angle_threshold_deg: Maximum angle difference in degrees (default: 5)
-        
-    Returns:
-        True if edgelet passes the angle test, False otherwise
-    """
-    threshold_rad = np.deg2rad(angle_threshold_deg)
-    
-    x1, y1, x2, y2 = edgelet
-    vp_x, vp_y = vp_plate
-    
-    # Calculate distances from both endpoints to vp_plate
-    dist1 = np.sqrt((x1 - vp_x)**2 + (y1 - vp_y)**2)
-    dist2 = np.sqrt((x2 - vp_x)**2 + (y2 - vp_y)**2)
-    
-    # Find furthest point
-    if dist1 > dist2:
-        furthest_x, furthest_y = x1, y1
-        other_x, other_y = x2, y2
-    else:
-        furthest_x, furthest_y = x2, y2
-        other_x, other_y = x1, y1
-    
-    # Vector from furthest point to vp_plate
-    vp_vec_x = vp_x - furthest_x
-    vp_vec_y = vp_y - furthest_y
-    vp_vec_len = np.sqrt(vp_vec_x**2 + vp_vec_y**2)
-    
-    if vp_vec_len == 0:
-        return False
-    
-    # Vector of the edgelet (from furthest to other point)
-    edgelet_vec_x = other_x - furthest_x
-    edgelet_vec_y = other_y - furthest_y
-    edgelet_vec_len = np.sqrt(edgelet_vec_x**2 + edgelet_vec_y**2)
-    
-    if edgelet_vec_len == 0:
-        return False
-    
-    # Normalize vectors
-    vp_vec_x /= vp_vec_len
-    vp_vec_y /= vp_vec_len
-    edgelet_vec_x /= edgelet_vec_len
-    edgelet_vec_y /= edgelet_vec_len
-    
-    # Calculate angle between vectors using dot product
-    dot_product = vp_vec_x * edgelet_vec_x + vp_vec_y * edgelet_vec_y
-    # Clamp to avoid numerical errors
-    dot_product = np.clip(dot_product, -1.0, 1.0)
-    angle = np.arccos(dot_product)
-    
-    # Return True if angle is less than threshold
-    return angle <= threshold_rad
-
-
 def estimate_vp_v(vp_u, plate_detector, show_video=False):
     """
     Two-phase estimation of perpendicular vanishing point (v):
@@ -813,6 +772,9 @@ def estimate_vp_v(vp_u, plate_detector, show_video=False):
     if show_video:
         output_dir = 'test_output/vp_debug'
         os.makedirs(output_dir, exist_ok=True)
+        # Create gradient subdirectory
+        gradient_dir = os.path.join(output_dir, 'gradient')
+        os.makedirs(gradient_dir, exist_ok=True)
     
     # Phase 1 parameters
     collected_plate_edges = []
@@ -826,8 +788,9 @@ def estimate_vp_v(vp_u, plate_detector, show_video=False):
     
     while len(collected_plate_edges) < min_edges_threshold:
         frame_count, frame = video.get_frame_background_subtracted()
-        if frame is None:
-            continue
+        if frame is None or frame_count is None:
+            logging.warning("Reached end of video during plate edge collection")
+            break
         # Initialize video writer for phase 1
         if show_video and video_writer_phase1 is None and frame is not None:
             frame_h, frame_w = frame.shape[:2]
@@ -850,18 +813,11 @@ def estimate_vp_v(vp_u, plate_detector, show_video=False):
                 cv2.waitKey(1)
             continue
         
-        # Compute gradient for HoughLinesP detection
-        grad_x = cv2.Sobel(frame, cv2.CV_32F, 1, 0, ksize=3)
-        grad_y = cv2.Sobel(frame, cv2.CV_32F, 0, 1, ksize=3)
-        grad_mag = np.sqrt(grad_x**2 + grad_y**2)
-        grad_mag_norm = cv2.normalize(grad_mag, None, 0, 255, cv2.NORM_MINMAX, cv2.CV_8U)
-        print(f"Time4: {time.perf_counter()}")
-        
         # Extract edges using HoughLinesP on plate edges with 85% min_length
-        plate_angles, plate_lines, plate_box, all_wireframes = _get_plate_angle_from_hough(
-            frame, grad_mag_norm, plate_boxes, min_length_ratio=min_length_ratio
+        # Gradient is computed separately for each plate inside _get_plate_angle_from_hough
+        plate_angles, plate_lines, plate_box, all_data = _get_plate_angle_from_hough(
+            frame, plate_boxes, min_length_ratio=min_length_ratio
         )
-        print(f"Time5: {time.perf_counter()}")
         
         if plate_lines is None or len(plate_lines) == 0:
             if show_video:
@@ -903,10 +859,24 @@ def estimate_vp_v(vp_u, plate_detector, show_video=False):
                 cv2.putText(vis_frame, f"Edges: {len(plate_lines)}", 
                            (x1, y2+20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 2)
                 
-                # Save individual plate image with detected edges
+                # Save individual plate image with detected edges, gradient, and wireframe
                 plate_crop = vis_frame[y1:y2, x1:x2].copy()
                 if plate_crop.size > 0:
-                    # Add edge information to the crop
+                    # Get the gradient and wireframe for this plate from all_data
+                    grad_plate_crop = None
+                    wireframe_crop = None
+                    for box, wireframe, grad in all_data:
+                        if np.array_equal(box, plate_box):
+                            wireframe_crop = wireframe
+                            grad_plate_crop = grad
+                            break
+                    
+                    if grad_plate_crop is None:
+                        continue
+                    
+                    grad_plate_crop_bgr = cv2.cvtColor(grad_plate_crop, cv2.COLOR_GRAY2BGR)
+                    
+                    # Add edge information to the crops
                     plate_h, plate_w = plate_crop.shape[:2]
                     info_img = np.zeros((60, plate_w, 3), dtype=np.uint8)
                     
@@ -921,10 +891,29 @@ def estimate_vp_v(vp_u, plate_detector, show_video=False):
                     # Combine plate crop with info
                     plate_with_info = np.vstack([plate_crop, info_img])
                     
-                    # Save plate image
+                    # Combine gradient crop with same info
+                    grad_with_info = np.vstack([grad_plate_crop_bgr, info_img.copy()])
+                    
+                    # Combine wireframe with same info if available
+                    images_to_combine = [plate_with_info, grad_with_info]
+                    if wireframe_crop is not None:
+                        wireframe_crop_bgr = cv2.cvtColor(wireframe_crop, cv2.COLOR_GRAY2BGR)
+                        wireframe_with_info = np.vstack([wireframe_crop_bgr, info_img.copy()])
+                        images_to_combine.append(wireframe_with_info)
+                    
+                    # Save all images side by side
+                    combined = np.hstack(images_to_combine)
                     plate_output_path = f'test_output/vp_debug/plate_{len(collected_plate_edges):03d}_edges.png'
-                    cv2.imwrite(plate_output_path, plate_with_info)
-                    logging.info(f"Saved plate with {len(plate_lines)} edges to: {plate_output_path}")
+                    cv2.imwrite(plate_output_path, combined)
+                    logging.info(f"Saved plate with edges, gradient, and wireframe to: {plate_output_path}")
+                    
+                    # Also save gradient separately
+                    grad_output_path = f'test_output/vp_debug/gradient/gradient_frame_{frame_count:04d}.jpg'
+                    cv2.imwrite(grad_output_path, grad_plate_crop)
+                    
+                    # Display combined visualization
+                    cv2.imshow('Plate Analysis (Plate | Gradient | Wireframe)', combined)
+                    cv2.waitKey(1)
             
             cv2.putText(vis_frame, f"Phase 1: Plate Edges {len(collected_plate_edges)}/{min_edges_threshold}", 
                        (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
@@ -935,9 +924,10 @@ def estimate_vp_v(vp_u, plate_detector, show_video=False):
                 logging.info("Early exit requested - Phase 1")
                 break
     
-    if show_video and video_writer_phase1 is not None:
-        video_writer_phase1.release()
-        logging.info(f"Saved Phase 1 video to: test_output/vp_debug/vp_v_phase1_plates.mp4")
+    if show_video:
+        if video_writer_phase1 is not None:
+            video_writer_phase1.release()
+            logging.info(f"Saved Phase 1 video to: test_output/vp_debug/vp_v_phase1_plates.mp4")
         cv2.destroyAllWindows()
         cv2.waitKey(1)
     
@@ -946,6 +936,11 @@ def estimate_vp_v(vp_u, plate_detector, show_video=False):
         return None
     
     logging.info(f"✓ Phase 1 complete: {len(collected_plate_edges)} plate edges collected")
+    
+    # Check if we have a valid frame for canvas shape
+    if frame is None:
+        logging.error("No valid frame available for canvas shape")
+        return None
     
     # Generate vpv_plate from plate edges (no horizontal opposition filter)
     canvas_shape = frame.shape[:2]
@@ -957,7 +952,6 @@ def estimate_vp_v(vp_u, plate_detector, show_video=False):
         save_graph=show_video,
         graph_name='vp_v_phase1_plate_edges'
     )
-    print(f"Time6: {time.perf_counter()}")
     
     if vpv_plate is None:
         logging.error("Failed to generate vpv_plate from plate edges")
@@ -993,17 +987,17 @@ def detect_road_and_cross_vps(show_video=False):
     # -------------------------------------------------------------------------
     # Step 1: Estimate VP-u (Road Direction)
     # -------------------------------------------------------------------------
-    # video.set_intended_fps(30)
-    # vpu = estimate_vp_u(
-    #     show_video=show_video
-    # )
+    video.set_intended_fps(30)
+    vpu = estimate_vp_u(
+        show_video=show_video
+    )
+    # vpu = (np.float32(1996.7653), np.float32(-516.6893))
     
-    # if vpu is None:
-    #     logging.error("Failed to estimate VP-u. Cannot proceed to VP-v estimation.")
-    #     return None, None
+    if vpu is None:
+        logging.error("Failed to estimate VP-u. Cannot proceed to VP-v estimation.")
+        return None, None
     
-    # logging.info(f"\n✓ VP-u (road direction) found: {vpu}\n")
-    vpu = (np.float32(1958.1123), np.float32(-476.17346))
+    logging.info(f"\n✓ VP-u (road direction) found: {vpu}\n")
     
     # -------------------------------------------------------------------------
     # Step 2: Prepare for VP-v Estimation
@@ -1018,13 +1012,13 @@ def detect_road_and_cross_vps(show_video=False):
     # -------------------------------------------------------------------------
     # Step 3: Estimate VP-v (Perpendicular Direction)
     # -------------------------------------------------------------------------
-    # video.set_intended_fps(10)
-    # vpv = estimate_vp_v(
-    #     vp_u=vpu,
-    #     plate_detector=plate_detector,
-    #     show_video=show_video
-    # )
-    vpv = np.array([-2408.5, 104.96])
+    video.set_intended_fps(10)
+    vpv = estimate_vp_v(
+        vp_u=vpu,
+        plate_detector=plate_detector,
+        show_video=show_video
+    )
+    # vpv = np.array([-83322, 864])
     
     if vpv is None:
         logging.error("Failed to estimate VP-v")

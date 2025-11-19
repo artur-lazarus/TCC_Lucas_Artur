@@ -68,17 +68,16 @@ def main():
     cpp_file = "cpp/src/tcc"
 
     time0 = time.perf_counter()
-    input_video_path = "dataset/session1_right/video.avi"
+    input_video_path = "assets/video.avi"
     json_calibration_path = "final_debug/calibration.json"
     colour = False
     start_frame = 0
-    original_fps = 50
     target_fps = 10
-    frame_interval = original_fps // target_fps
     detection_frame_count = 300
     video_background_window_size = 800
     visualize_detection = True
     video_resolution = (1920, 1080)  # (W, H)
+    max_road_length = 40
 
     kalman_sigma_a = 400.0
     kalman_sigma_z = 2.0
@@ -89,7 +88,7 @@ def main():
     time1 = time.perf_counter()
     print(f"Setup time: {time1 - time0:.3f} seconds")
 
-    video.set_config(input_video_path, frame_interval=frame_interval, colour=colour, make_background=True)
+    video.set_config(input_video_path, target_fps, colour=colour, make_background=True)
     video.start_background(window_size=video_background_window_size, W=video_resolution[0], H=video_resolution[1])
     if start_frame > 0:
         video.jump_to_frame(start_frame)
@@ -97,15 +96,16 @@ def main():
     print(f"Video instantiation time: {time2 - time1:.3f} seconds")
 
     # Background population
-    #for _ in range(video_background_window_size):
-    #    if _ % 50 == 0:
-    #        print(f"Populating background: frame {_}/{video_background_window_size}")
-    #    video.get_frame()
+    for _ in range(video_background_window_size):
+        if _ % 50 == 0:
+            print(f"Background population: {_}/{video_background_window_size} - {time.perf_counter() - last_time:.3f}sec")
+            last_time = time.perf_counter()
+        video.get_frame()
     time3 = time.perf_counter()
 
     # Calibration
     print(f"Initial background population time: {time3 - time2:.3f} seconds")
-    H_matrix, roi_polygon, H_out, W_out, lanes_y_pxs, scale_lambda, calibration_background_object = calibration.calibrate(show_video=True)
+    H_matrix, roi_polygon, H_out, W_out, lanes_y_pxs, scale_lambda, calibration_background_object = calibration.calibrate(show_video=True, max_width_meters=max_road_length)
     time4 = time.perf_counter()
     print(f"Calibration computation time: {time4 - time3:.3f} seconds")
 

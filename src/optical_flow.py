@@ -60,8 +60,10 @@ def flow_subtract(flow_polar, direction_range, threshold, save=False):
             dir_min, dir_max = dir_max, dir_min
         dir_mask = cv2.inRange(flow_polar[1], dir_min, dir_max)
         mag_mask = cv2.inRange(flow_polar[0], threshold, 1e6)
-        #cv2.imshow("Direction Mask", dir_mask)
-        #cv2.waitKey(1)
+        # cv2.imshow("Direction Mask", dir_mask)
+        # cv2.waitKey(1)
+        # cv2.imshow("Mag Mask", mag_mask)
+        # cv2.waitKey(1)
         combined_mask = cv2.bitwise_and(dir_mask, mag_mask)
         return combined_mask
 
@@ -107,7 +109,7 @@ if __name__ == "__main__":
     import video_stream
 
     test_video = video_stream.VideoStream()
-    test_video.set_config("dataset/session0_left/video.avi", frame_interval=1, colour=False)
+    test_video.set_config("dataset/session0_left/video.avi", None, colour=False)
     frames = [test_video.get_frame()[1]]
     for i in range(10):
         _, frame = test_video.get_frame()

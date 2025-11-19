@@ -51,23 +51,25 @@ def get_rotation_matrix_from_vps(vp_forward_px, vp_side_px, K):
 
     return R[:,0], R[:,1], R[:,2]
 
-def build_img_to_bird_homography(img_shape, K, r1, r2, scale=None, margin=0.02, roi_polygon=None, target_width_px=1280.0):
+def compute_ground_plane_bounds(img_shape, K, r1, r2, roi_polygon=None):
     """
-    Returns M_img_to_bird (3x3) and (W_out, H_out).
-    Uses H_img->plane = (K [r1 r2 -r3])^{-1}. Global scale is arbitrary;
-    we set t ∝ -r3 which is valid since homographies are up to scale.
+    Compute the ground plane bounds (in pseudo-units) for the ROI.
+    
+    Returns:
+        H_img_to_plane: 3x3 homography from image to ground plane
+        bounds: dict with keys 'Xmin', 'Xmax', 'Ymin', 'Ymax' in pseudo-units
     """
     r1 = np.asarray(r1, dtype=np.float64)
     r2 = np.asarray(r2, dtype=np.float64)
     r1 /= np.linalg.norm(r1); r2 /= np.linalg.norm(r2)
     r3 = np.cross(r1, r2); r3 /= np.linalg.norm(r3)
 
-    H_plane_to_img = K @ np.column_stack((r1, r2, -r3))  # t ∝ -r3
+    H_plane_to_img = K @ np.column_stack((r1, r2, -r3))
     H_img_to_plane = np.linalg.inv(H_plane_to_img)
 
     H_img, W_img = img_shape[:2]
 
-    # Robust bounds via sampling; if roi_polygon provided, restrict sampling to ROI
+    # Sample ROI to get bounds
     if roi_polygon is None:
         xs = np.linspace(0, W_img - 1, 25)
         ys = np.linspace(0, H_img - 1, 25)
@@ -76,7 +78,6 @@ def build_img_to_bird_homography(img_shape, K, r1, r2, scale=None, margin=0.02, 
         poly = np.asarray(roi_polygon, dtype=np.int32).reshape(-1, 1, 2)
         roi_mask = np.zeros((H_img, W_img), dtype=np.uint8)
         cv2.fillPoly(roi_mask, [poly], 255)
-        # pick an adaptive subset of ROI pixels (up to ~5000 samples)
         ys_idx, xs_idx = np.where(roi_mask > 0)
         if ys_idx.size == 0:
             raise ValueError("ROI polygon has zero area or lies outside image.")
@@ -91,19 +92,19 @@ def build_img_to_bird_homography(img_shape, K, r1, r2, scale=None, margin=0.02, 
         grid_pts = np.stack([xs_idx, ys_idx], axis=1).astype(np.float64)
 
     ones = np.ones((grid_pts.shape[0], 1), dtype=np.float64)
-    grid_h = np.hstack([grid_pts, ones]).T  # 3xN
-
-    plane_h = H_img_to_plane @ grid_h  # 3xN
+    grid_h = np.hstack([grid_pts, ones]).T
+    
+    plane_h = H_img_to_plane @ grid_h
     w = plane_h[2, :]
     good = np.abs(w) > 1e-6
+    
     if not np.any(good):
-        # Fallback to 4 corners
         corners_img = np.array([
-            [0,        0,        1],
-            [W_img-1., 0,        1],
+            [0, 0, 1],
+            [W_img-1., 0, 1],
             [W_img-1., H_img-1., 1],
-            [0,        H_img-1., 1]
-        ], dtype=np.float64).T  # 3x4
+            [0, H_img-1., 1]
+        ], dtype=np.float64).T
         corners_plane_h = H_img_to_plane @ corners_img
         w = corners_plane_h[2, :]
         good = np.abs(w) > 1e-6
@@ -112,31 +113,194 @@ def build_img_to_bird_homography(img_shape, K, r1, r2, scale=None, margin=0.02, 
         finite_pts = (plane_h[:2, good] / w[good]).T
 
     if finite_pts.shape[0] < 3:
-        raise RuntimeError("Homography produced <3 finite samples. Check vanishing points/intrinsics; horizon may pass inside image.")
+        raise RuntimeError("Homography produced <3 finite samples.")
 
     Xmin, Ymin = finite_pts.min(axis=0)
     Xmax, Ymax = finite_pts.max(axis=0)
 
-    # expand a bit so we don't clip edges
-    dx, dy = (Xmax - Xmin), (Ymax - Ymin)
-    Xmin -= margin*dx; Xmax += margin*dx
-    Ymin -= margin*dy; Ymax += margin*dy
+    bounds = {
+        'Xmin': Xmin,
+        'Xmax': Xmax,
+        'Ymin': Ymin,
+        'Ymax': Ymax
+    }
+    
+    return H_img_to_plane, bounds
 
-    # choose scale (pixels per world-unit). If not given, aim for target_width_px (ROI-driven)
-    if scale is None:
-        scale = float(target_width_px) / max(1e-9, (Xmax - Xmin))
 
+def build_img_to_bird_homography_with_bounds(H_img_to_plane, bounds, target_width_px=1280.0):
+    """
+    Build bird's eye homography with explicit ground plane bounds.
+    
+    Args:
+        H_img_to_plane: 3x3 homography from image to ground plane
+        bounds: dict with 'Xmin', 'Xmax', 'Ymin', 'Ymax' in pseudo-units
+        target_width_px: desired output width in pixels
+        
+    Returns:
+        M_img_to_bird: 3x3 homography from image to bird's eye view
+        (W_out, H_out): output dimensions in pixels
+        scale: pixels per pseudo-unit (for reference)
+    """
+    Xmin = bounds['Xmin']
+    Xmax = bounds['Xmax']
+    Ymin = bounds['Ymin']
+    Ymax = bounds['Ymax']
+    
+    # Calculate scale to achieve target width
+    scale = float(target_width_px) / max(1e-9, (Xmax - Xmin))
+    
     W_out = int(np.clip(int(round((Xmax - Xmin) * scale)), 32, 8192))
     H_out = int(np.clip(np.ceil((Ymax - Ymin) * scale), 32, 8192))
-
+    
     L_world_to_bird = np.array([
         [scale,    0.0,  -scale*Xmin],
         [0.0,    scale,  -scale*Ymin],
         [0.0,      0.0,            1]
     ], dtype=np.float64)
-
+    
     M_img_to_bird = L_world_to_bird @ H_img_to_plane
-    return M_img_to_bird, (W_out, H_out)
+    return M_img_to_bird, (W_out, H_out), scale
+
+
+def build_img_to_bird_homography(img_shape, K, r1, r2, scale=None, margin=0.02, roi_polygon=None, target_width_px=1280.0):
+    """
+    Returns M_img_to_bird (3x3) and (W_out, H_out).
+    Uses H_img->plane = (K [r1 r2 -r3])^{-1}. Global scale is arbitrary;
+    we set t ∝ -r3 which is valid since homographies are up to scale.
+    
+    This is the original API maintained for backward compatibility.
+    For more control, use compute_ground_plane_bounds() followed by
+    build_img_to_bird_homography_with_bounds().
+    """
+    H_img_to_plane, bounds = compute_ground_plane_bounds(
+        img_shape, K, r1, r2, roi_polygon, margin
+    )
+    
+    if scale is not None:
+        # Use provided scale instead of computing from target_width_px
+        Xmin, Xmax = bounds['Xmin'], bounds['Xmax']
+        Ymin, Ymax = bounds['Ymin'], bounds['Ymax']
+        W_out = int(np.clip(int(round((Xmax - Xmin) * scale)), 32, 8192))
+        H_out = int(np.clip(np.ceil((Ymax - Ymin) * scale), 32, 8192))
+        
+        L_world_to_bird = np.array([
+            [scale,    0.0,  -scale*Xmin],
+            [0.0,    scale,  -scale*Ymin],
+            [0.0,      0.0,            1]
+        ], dtype=np.float64)
+        
+        M_img_to_bird = L_world_to_bird @ H_img_to_plane
+        return M_img_to_bird, (W_out, H_out)
+    else:
+        M_img_to_bird, (W_out, H_out), _ = build_img_to_bird_homography_with_bounds(
+            H_img_to_plane, bounds, target_width_px
+        )
+        return M_img_to_bird, (W_out, H_out)
+
+
+def recalculate_scale_for_max_width(bounds, scale_lambda, intrinsic_scale, max_width_meters, 
+                                     H_img_to_plane=None, roi_polygon=None, img_shape=None):
+    """
+    Crop ground plane bounds to achieve a maximum width in meters.
+    Recalculates Y bounds based on polygon points within the new X range.
+    
+    Args:
+        bounds: dict with 'Xmin', 'Xmax', 'Ymin', 'Ymax' in pseudo-units
+        scale_lambda: meters per pseudo-unit (from estimate_scale)
+        intrinsic_scale: pixels per pseudo-unit
+        max_width_meters: desired maximum width in meters
+        H_img_to_plane: 3x3 homography from image to ground plane (optional, for Y recalculation)
+        roi_polygon: ROI polygon in image coordinates (optional, for Y recalculation)
+        img_shape: image shape tuple (H, W) (optional, for Y recalculation)
+        
+    Returns:
+        new_bounds: dict with cropped bounds and recalculated Y bounds
+        actual_width_meters: actual width that will be achieved
+        
+    Note: If H_img_to_plane and roi_polygon are provided, Y bounds will be 
+          recalculated based on polygon points within the new X range.
+    """
+    Xmin = bounds['Xmin']
+    Xmax = bounds['Xmax']
+    Ymin = bounds['Ymin']
+    Ymax = bounds['Ymax']
+    
+    # Calculate current width in meters
+    width_pseudo_units = (Xmax - Xmin) * intrinsic_scale
+    width_meters = width_pseudo_units * scale_lambda
+    
+    # Check if cropping is needed
+    if width_meters <= max_width_meters:
+        # No cropping needed
+        return bounds.copy(), width_meters
+    
+    # Crop width to max_width_meters
+    target_width_pseudo_units = max_width_meters / scale_lambda
+    
+    new_Xmin = Xmin
+    new_Xmax = Xmin + target_width_pseudo_units / intrinsic_scale
+    
+    # Recalculate Y bounds if homography and polygon are provided
+    if H_img_to_plane is not None and roi_polygon is not None and img_shape is not None:
+        # Re-sample polygon and filter points within new X range
+        poly = np.asarray(roi_polygon, dtype=np.int32).reshape(-1, 1, 2)
+        H_img, W_img = img_shape[:2]
+        roi_mask = np.zeros((H_img, W_img), dtype=np.uint8)
+        cv2.fillPoly(roi_mask, [poly], 255)
+        ys_idx, xs_idx = np.where(roi_mask > 0)
+        
+        if ys_idx.size > 0:
+            N = ys_idx.size
+            max_samples = 5000
+            if N > max_samples:
+                stride = int(np.ceil(np.sqrt(N / max_samples)))
+            else:
+                stride = 1
+            ys_idx = ys_idx[::stride]
+            xs_idx = xs_idx[::stride]
+            grid_pts = np.stack([xs_idx, ys_idx], axis=1).astype(np.float64)
+            
+            # Project to ground plane
+            ones = np.ones((grid_pts.shape[0], 1), dtype=np.float64)
+            grid_h = np.hstack([grid_pts, ones]).T
+            plane_h = H_img_to_plane @ grid_h
+            w = plane_h[2, :]
+            good = np.abs(w) > 1e-6
+            
+            if np.any(good):
+                finite_pts = (plane_h[:2, good] / w[good]).T
+                
+                # Filter points within new X range
+                x_mask = (finite_pts[:, 0] >= new_Xmin) & (finite_pts[:, 0] <= new_Xmax)
+                if np.any(x_mask):
+                    filtered_pts = finite_pts[x_mask]
+                    new_Ymin = filtered_pts[:, 1].min()
+                    new_Ymax = filtered_pts[:, 1].max()
+                    print(f"[recalculate_scale_for_max_width] Recalculated Y bounds: [{new_Ymin:.2f}, {new_Ymax:.2f}]")
+                else:
+                    # Keep original Y bounds if no points in X range
+                    new_Ymin = Ymin
+                    new_Ymax = Ymax
+            else:
+                new_Ymin = Ymin
+                new_Ymax = Ymax
+        else:
+            new_Ymin = Ymin
+            new_Ymax = Ymax
+    else:
+        # Keep original Y bounds if no homography provided
+        new_Ymin = Ymin
+        new_Ymax = Ymax
+    
+    new_bounds = {
+        'Xmin': new_Xmin,
+        'Xmax': new_Xmax,
+        'Ymin': new_Ymin,
+        'Ymax': new_Ymax
+    }
+    
+    return new_bounds, max_width_meters
 
 def f_from_two_orthogonal_vps(v1, v2, cx, cy):
     du1, dv1 = v1[0]-cx, v1[1]-cy

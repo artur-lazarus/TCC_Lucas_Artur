@@ -1,0 +1,15 @@
+VIDEO INFORMATION REPORT
+==================================================
+Generated for: assets/video1.mp4
+
+File Size: 228.13 MB
+Resolution: 1920 x 1080
+Aspect Ratio: 1.78:1
+FPS: 25.36
+Total Frames: 7,589
+Duration: 00:04:59 (299.24 seconds)
+Codec: h264
+Brightness: 0.0
+Contrast: 0.0
+Saturation: 0.0
+Hue: 0.0

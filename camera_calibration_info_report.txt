@@ -1,0 +1,32 @@
+NPZ FILE INFORMATION REPORT
+============================================================
+Source file: ./lib/intrinsic_calibration/camera_calibration.npz
+Generated on: 2025-11-19T04:41:47
+
+Total arrays: 2
+Total memory: 0.00 MB
+
+ARRAY DETAILS:
+----------------------------------------
+
+1. Array: 'mtx'
+   Shape: (3, 3)
+   Dtype: float64
+   Size: 9 elements
+   Memory: 0.00 MB
+   Statistics:
+     Min: 0.0
+     Max: 392.10383249644326
+     Mean: 151.055088
+     Std: 173.162113
+
+2. Array: 'dist'
+   Shape: (1, 5)
+   Dtype: float64
+   Size: 5 elements
+   Memory: 0.00 MB
+   Statistics:
+     Min: -0.05097872186714067
+     Max: 0.010833148382987946
+     Mean: -0.015357
+     Std: 0.023787

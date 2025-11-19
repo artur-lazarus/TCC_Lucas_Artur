@@ -262,28 +262,41 @@ def _get_projected_corners(hull):
     
     corners = {}
     
-    def dist(p1, p2):
-        if p1 is None or p2 is None:
+    # For corner A: red line closest to vertical from VP1 x bottom green line
+    def line_verticality(line):
+        """Measure how vertical a line is (smaller ratio means more vertical)"""
+        p1, p2 = line
+        dx = abs(p2[0] - p1[0])
+        dy = abs(p2[1] - p1[1])
+        if dy == 0:
             return float('inf')
-        return np.sqrt((p1[0] - p2[0])**2 + (p1[1] - p2[1])**2)
+        return dx / dy
     
-    a_candidates = [
-        _line_line_intersection(t_red_l, t_green_l),
-        _line_line_intersection(t_red_l, t_green_u),
-        _line_line_intersection(t_red_u, t_green_l),
-        _line_line_intersection(t_red_u, t_green_u)
-    ]
-    a_distances = [dist(a, VP3) for a in a_candidates]
-    corners['A'] = a_candidates[np.argmin(a_distances)]
+    red_vert_l = line_verticality(t_red_l)
+    red_vert_u = line_verticality(t_red_u)
     
-    b_candidates = [
-        _line_line_intersection(t_green_l, t_blue_l),
-        _line_line_intersection(t_green_l, t_blue_r),
-        _line_line_intersection(t_green_u, t_blue_l),
-        _line_line_intersection(t_green_u, t_blue_r)
-    ]
-    b_distances = [dist(b, VP1) for b in b_candidates]
-    corners['B'] = b_candidates[np.argmax(b_distances)]
+    # Choose red line closest to vertical
+    red_line_for_a = t_red_l if red_vert_l < red_vert_u else t_red_u
+    
+    # Choose bottom green line (higher y-coordinate at hull point)
+    green_bottom = t_green_l if t_green_l[1][1] > t_green_u[1][1] else t_green_u
+    
+    # Compute corner A
+    corners['A'] = _line_line_intersection(red_line_for_a, green_bottom)
+    
+    # For corner B: blue line furthest from VP1 x bottom green line
+    def distance_from_point(line, point):
+        """Calculate distance from point to line"""
+        return abs(((line[1][0] - line[0][0]) * (line[0][1] - point[1])) - ((line[0][0] - point[0]) * (line[1][1] - line[0][1]))) / np.sqrt((line[1][0] - line[0][0])**2 + (line[1][1] - line[0][1])**2)
+    
+    blue_dist_l = distance_from_point(t_blue_l, VP1)
+    blue_dist_r = distance_from_point(t_blue_r, VP1)
+    
+    # Choose blue line furthest from VP1
+    blue_line_for_b = t_blue_l if blue_dist_l > blue_dist_r else t_blue_r
+    
+    # Compute corner B
+    corners['B'] = _line_line_intersection(blue_line_for_b, green_bottom)
     
     if corners['A'] is None or corners['B'] is None:
         return None, None
@@ -363,7 +376,7 @@ def _process_frame(frame, show_video=False):
     return widths
 
 
-def estimate_scale(vp1, vp2, vp3, show_video=False):
+def estimate_scale(vp1, vp2, vp3, show_video=False, save_video=False):
     """
     Process video to collect vehicle width measurements and compute scene scale.
     
@@ -383,102 +396,104 @@ def estimate_scale(vp1, vp2, vp3, show_video=False):
     
     VP1, VP2, VP3, H = vp1, vp2, vp3, video.H_matrix
     min_measurements = 100
+    min_frames = 1000
+    initial_frame_count = video.get_frame()[0]
     
-    # logging.info(f"Collecting {min_measurements} width measurements for scale estimation")
+    logging.info(f"Collecting {min_measurements} width measurements for scale estimation")
     
-    # video_writer = None
-    # if show_video:
-    #     output_dir = 'test_output/scale_debug'
-    #     os.makedirs(output_dir, exist_ok=True)
+    video_writer = None
+    if save_video:
+        output_dir = 'test_output/scale_debug'
+        os.makedirs(output_dir, exist_ok=True)
     
-    # all_measurements = []
-    # while len(all_measurements) < min_measurements:
-    #     frame_count, frame = video.get_frame_with_roi()
+    all_measurements = []
+    while len(all_measurements) < min_measurements or (frame_count - initial_frame_count) < min_frames:
+        frame_count, frame = video.get_frame_with_roi()
         
-    #     if frame is None:
-    #         continue
+        if frame is None:
+            continue
         
-    #     mask = video._background.background_subtract_yolo(frame, conf_threshold=0.8)
+        mask = video._background.background_subtract_yolo(frame, conf_threshold=0.8)
         
-    #     if show_video:
-    #         widths, vis_data_list = _process_frame(mask, show_video=True)
+        if show_video:
+            widths, vis_data_list = _process_frame(mask, show_video=True)
             
-    #         if video_writer is None and frame is not None:
-    #             frame_h, frame_w = frame.shape[:2]
-    #             fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    #             video_writer = cv2.VideoWriter(
-    #                 'test_output/scale_debug/scale_estimation.mp4',
-    #                 fourcc, 10.0, (frame_w, frame_h)
-    #             )
+            if video_writer is None and frame is not None and save_video:
+                frame_h, frame_w = frame.shape[:2]
+                fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                video_writer = cv2.VideoWriter(
+                    'test_output/scale_debug/scale_estimation.mp4',
+                    fourcc, 10.0, (frame_w, frame_h)
+                )
             
-    #         vis_frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+            vis_frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
             
-    #         for vis_data in vis_data_list:
-    #             corners = vis_data['corners']
-    #             tangent_lines = vis_data['tangent_lines']
-    #             hull = vis_data['hull']
-    #             width = vis_data['width']
+            for vis_data in vis_data_list:
+                corners = vis_data['corners']
+                tangent_lines = vis_data['tangent_lines']
+                hull = vis_data['hull']
+                width = vis_data['width']
                 
-    #             cv2.drawContours(vis_frame, [hull], -1, (255, 255, 0), 2)
+                cv2.drawContours(vis_frame, [hull], -1, (255, 255, 0), 2)
                 
-    #             tangent_colors = {
-    #                 "red_lower": (0, 0, 255), "red_upper": (0, 0, 255),
-    #                 "green_lower": (0, 255, 0), "green_upper": (0, 255, 0),
-    #                 "blue_left": (255, 0, 0), "blue_right": (255, 0, 0)
-    #             }
+                tangent_colors = {
+                    "red_lower": (0, 0, 255), "red_upper": (0, 0, 255),
+                    "green_lower": (0, 255, 0), "green_upper": (0, 255, 0),
+                    "blue_left": (255, 0, 0), "blue_right": (255, 0, 0)
+                }
                 
-    #             for name, line in tangent_lines.items():
-    #                 if line is not None:
-    #                     p1, p2 = line
-    #                     color = tangent_colors.get(name, (128, 128, 128))
-    #                     vx, vy = int(p1[0]), int(p1[1])
-    #                     px, py = int(p2[0]), int(p2[1])
-    #                     p_ext_x = int(1.5*px - 0.5*vx)
-    #                     p_ext_y = int(1.5*py - 0.5*vy)
-    #                     cv2.line(vis_frame, (vx, vy), (p_ext_x, p_ext_y), color, 2)
+                for name, line in tangent_lines.items():
+                    if line is not None:
+                        p1, p2 = line
+                        color = tangent_colors.get(name, (128, 128, 128))
+                        vx, vy = int(p1[0]), int(p1[1])
+                        px, py = int(p2[0]), int(p2[1])
+                        p_ext_x = int(1.5*px - 0.5*vx)
+                        p_ext_y = int(1.5*py - 0.5*vy)
+                        cv2.line(vis_frame, (vx, vy), (p_ext_x, p_ext_y), color, 2)
                 
-    #             for point_name in ['A', 'B']:
-    #                 if point_name in corners:
-    #                     point = corners[point_name]
-    #                     cv2.circle(vis_frame, point, 6, (0, 255, 255), -1)
-    #                     cv2.putText(vis_frame, point_name, (point[0] + 8, point[1] + 8),
-    #                                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+                for point_name in ['A', 'B']:
+                    if point_name in corners:
+                        point = corners[point_name]
+                        cv2.circle(vis_frame, point, 6, (0, 255, 255), -1)
+                        cv2.putText(vis_frame, point_name, (point[0] + 8, point[1] + 8),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
                 
-    #             pt1 = corners['A']
-    #             pt2 = corners['B']
-    #             cv2.line(vis_frame, pt1, pt2, (255, 255, 255), 2)
+                pt1 = corners['A']
+                pt2 = corners['B']
+                cv2.line(vis_frame, pt1, pt2, (255, 255, 255), 2)
                 
-    #             mid_x = (pt1[0] + pt2[0]) // 2
-    #             mid_y = (pt1[1] + pt2[1]) // 2
-    #             cv2.putText(vis_frame, f"W: {width:.2f}", (mid_x, mid_y - 10),
-    #                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                mid_x = (pt1[0] + pt2[0]) // 2
+                mid_y = (pt1[1] + pt2[1]) // 2
+                cv2.putText(vis_frame, f"W: {width:.2f}", (mid_x, mid_y - 10),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
             
-    #         cv2.putText(vis_frame, f"Frame: {frame_count} | Measurements: {len(all_measurements)}/{min_measurements}",
-    #                    (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+            cv2.putText(vis_frame, f"Frame: {frame_count - initial_frame_count} | Measurements: {len(all_measurements)}/{min_measurements}",
+                       (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
             
-    #         if video_writer is not None:
-    #             video_writer.write(vis_frame)
+            if video_writer is not None:
+                video_writer.write(vis_frame)
             
-    #         cv2.imshow('Scale Estimation', vis_frame)
-    #         if cv2.waitKey(1) & 0xFF == ord('q'):
-    #             logging.info("Early exit requested by user")
-    #             break
-    #     else:
-    #         widths = _process_frame(mask, show_video=False)
+            cv2.imshow('Scale Estimation', vis_frame)
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                logging.info("Early exit requested by user")
+                break
+        else:
+            widths = _process_frame(mask, show_video=False)
         
-    #     all_measurements.extend(widths)
+        all_measurements.extend(widths)
     
-    # if show_video:
-    #     if video_writer is not None:
-    #         video_writer.release()
-    #         logging.info("Saved video to: test_output/scale_debug/scale_estimation.mp4")
-    #     cv2.destroyAllWindows()
-    #     cv2.waitKey(1)
+    if show_video:
+        if video_writer is not None:
+            video_writer.release()
+            logging.info("Saved video to: test_output/scale_debug/scale_estimation.mp4")
+        cv2.destroyAllWindows()
+        cv2.waitKey(1)
     
-    # lambda_final = _compute_scale_from_measurements(
-    #     all_measurements,
-    #     real_car_width=1.81
-    # )
+    lambda_final = _compute_scale_from_measurements(
+        all_measurements,
+        real_car_width=1.81
+    )
     
-    # return lambda_final
-    return 0.021356
+    return lambda_final
+    # return 0.138827
