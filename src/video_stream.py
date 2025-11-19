@@ -7,6 +7,10 @@ class VideoStream:
         self._background = None
         self.original_fps = 50
 
+    def jump_to_frame(self, frame_number):
+        self.cap.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
+        self.frame_count = frame_number
+
     def set_config(self, video_path, frame_interval=1, colour=True, make_background=False):
         self.cap = cv2.VideoCapture(video_path)
         if not self.cap.isOpened():
@@ -47,12 +51,19 @@ class VideoStream:
 
     def get_frame_warped(self):
         frame_count, frame = self.get_frame()
+        i=0
+        if (frame_count//5)%50 == 0:
+            i = frame_count//5
+        if i != 0:
+            cv2.imwrite(f"test_output/calibration_debug/frame_before_warp_{i}.png", frame)
         warped_frame = cv2.warpPerspective(frame, 
                                          self.H_matrix, 
                                          (self.warped_W_out, self.warped_H_out),
                                          flags=cv2.INTER_LINEAR,
                                          borderMode=cv2.BORDER_CONSTANT,
                                          borderValue=0)
+        if i != 0:
+            cv2.imwrite(f"test_output/calibration_debug/frame_after_warp_{i}.png", warped_frame)
         return (frame_count, warped_frame)
     
     def get_frame_background_subtracted(self, threshold=14, subtract_percentile = 50, normalize=False, norm_percentiles=(10,90)):

@@ -37,6 +37,7 @@ struct Track {
     int   hits            = 0;
     int   time_since_update = 0;
     int   age             = 0;
+    Point last_detection;
 
     std::vector<Vec4> filtered_states;
     std::vector<Mat4> filtered_covs;
@@ -66,7 +67,7 @@ struct Track {
     );
 
     void predict(int frame_count);
-    void update(const Point& z_pt);
+    void update(const Point& z_pt, int frame_count);
     Point position() const;
     Point velocity() const;
 };
@@ -91,9 +92,10 @@ struct AverageVelocity {
 class Tracker {
 public:
     Tracker(double dt = 1.0 / 30.0,
+            double scale_lambda = 1.0,
             double sigma_a = 5.0,
             double sigma_z = 3.0,
-            double distance_threshold = 50.0,
+            double distance_threshold = 100.0,
             int max_age = 10,
             int min_hits = 2);
 
@@ -115,6 +117,7 @@ public:
 
 private:
     double dt_;
+    double scale_lambda_;
     double sigma_a_;
     double sigma_z_;
     double distance_threshold_;

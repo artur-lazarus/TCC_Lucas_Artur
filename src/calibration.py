@@ -401,18 +401,18 @@ def calibrate(show_video = False):
     """Calibrate camera parameters from video frames."""
     main_movement_range_frame_number = 800
     roi_polygon_frame_number = 800
-    warped_bg_window_size = 800
+    warped_bg_window_size = 400
     get_lanes_frame_number = 800
 
     movement_range_coverage = 0.9
     flow_magnitude_threshold = 2.0
-    min_area_for_car_detection = 1600 #TODO: Change based on scaling later
+    min_car_area_m2 = 13.68
 
     timec0 = time.perf_counter()
-    start_angle, end_angle, chosen_bins = get_main_movement_range(
-        main_movement_range_frame_number, 
-        coverage_threshold=movement_range_coverage, 
-        magnitude_threshold=flow_magnitude_threshold)
+    #start_angle, end_angle, chosen_bins = get_main_movement_range(
+    #    main_movement_range_frame_number, 
+    #    coverage_threshold=movement_range_coverage, 
+    #    magnitude_threshold=flow_magnitude_threshold)
 
 
     timec1 = time.perf_counter()
@@ -464,6 +464,12 @@ def calibrate(show_video = False):
     H_matrix, (W_out, H_out) = homography.build_img_to_bird_homography(
         frame.shape, K_matrix, r1, r2, scale=None, margin=0.01, roi_polygon=polygon_pts, target_width_px=1920.0
     )
+    if perpendicular_vp[0] < cx:
+        H_matrix = np.array([
+                            [1, 0, 0],
+                            [0, -1, H_out - 1],
+                            [0, 0, 1]
+                            ], dtype=float) @ H_matrix
     video.set_warping_configs(H_matrix, W_out, H_out)
     
     vertical_vp = _compute_vp3_from_vp1_vp2(road_vp, perpendicular_vp, K_matrix)
@@ -474,13 +480,12 @@ def calibrate(show_video = False):
     background_warped = background.Background(W_out, H_out, warped_bg_window_size)
     for _ in range(warped_bg_window_size):
         if _ % 50 == 0:
-            print(f"Background population frame {_}/{warped_bg_window_size}")
+            print(f"Warped background population frame {_}/{warped_bg_window_size}")
         frame_warped = video.get_frame_warped()[1]
         background_warped.update(frame_warped)
-
-
-    # lanes_y_pxs = get_lanes_y_pxs(get_lanes_frame_number, background_warped, min_area_for_car_detection)
-    lanes_y_pxs = [126, 298]
+    min_car_area_px = int((min_car_area_m2 / (scale_lambda ** 2)))
+    # lanes_y_pxs = get_lanes_y_pxs(get_lanes_frame_number, background_warped, min_car_area_px)
+    lanes_y_pxs = [268, 440]
     print(f"Lane Y pixels: {lanes_y_pxs}")
 
     with open("test_output/calibration_debug/calibration_info.txt", "w") as fout:
@@ -520,7 +525,7 @@ def calibrate(show_video = False):
     warped_example = video.get_frame_warped()[1]
     cv2.imwrite("test_output/calibration_debug/warped_example.png", warped_example)
     print("Saved: test_output/calibration_debug/warped_example.png")
-
+    cv2.imshow("Background warped", background_warped.get_background_percentile(50))
     return H_matrix, polygon_pts, H_out, W_out, lanes_y_pxs, scale_lambda, background_warped
 
 if __name__ == "__main__":

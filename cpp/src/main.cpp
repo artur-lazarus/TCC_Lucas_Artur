@@ -2,24 +2,21 @@
 #include <iostream>
 #include <string>
 
-int main(int argc, char** argv) {
+int camera_test_main(int argc, char** argv) {
     std::cout << "=== Traffic Speed Detection System ===" << std::endl;
     std::cout << "=== IMX477 Camera Performance Test ===\n" << std::endl;
     
     // Parse command line arguments
     std::string test_mode = "quick";
     int num_frames = 30;
-    long frame_interval=100000;
+    
     if (argc > 1) {
         test_mode = argv[1];
     }
     if (argc > 2) {
         num_frames = std::stoi(argv[2]);
     }
-    if (argc > 3){
-        frame_interval = std::stoi(argv[3]);
-    }
-
+    
     // Show help
     if (test_mode == "help" || test_mode == "-h" || test_mode == "--help") {
         std::cout << "Usage: " << argv[0] << " [mode] [frames]\n" << std::endl;
@@ -61,7 +58,7 @@ int main(int argc, char** argv) {
     std::cout << "✓ Camera initialized successfully\n" << std::endl;
     
     std::cout << "--- Test 2: Start Capture ---" << std::endl;
-    if (!camera.startCapture(frame_interval)) {
+    if (!camera.startCapture()) {
         std::cerr << "❌ Failed to start capture!" << std::endl;
         return 1;
     }

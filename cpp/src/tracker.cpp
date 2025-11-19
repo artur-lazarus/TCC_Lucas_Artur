@@ -1,6 +1,8 @@
 #include "tracker.hpp"
 #include <algorithm>
 #include <cmath>
+#include <numeric>
+#include <iostream>
 
 void motion_matrices(double dt, Mat4& F, Mat24& H) {
     F <<
@@ -58,6 +60,9 @@ void kalman_smoother(
             xs[k] + G * (xs_smooth[k + 1] - F * xs[k]);
         Ps_smooth[k] =
             Ps[k] + G * (Ps_smooth[k + 1] - P_pred) * G.transpose();
+
+        xs_smooth[k](2) = xs[k](2);
+        xs_smooth[k](3) = xs[k](3);
     }
 }
 
@@ -109,23 +114,20 @@ Track Track::from_two_detections(
     t.x << pt1.x(), pt1.y(), vx, vy;
 
     double var_pos = sigma_z * sigma_z;
-    double var_v   = 2.0 * sigma_z * sigma_z / (dt * dt);
-    var_v += t.Q(2, 2);
+    double var_v   = 0.1;
 
     t.P = Mat4::Zero();
     t.P.diagonal() << var_pos, var_pos, var_v, var_v;
 
     t.hits             = 2;
     t.time_since_update = 0;
+    t.filtered_states.push_back(t.x);
     return t;
 }
 
 void Track::predict(int frame_count) {
     x = F * x;
     P = F * P * F.transpose() + Q;
-
-    filtered_states.push_back(x);
-    filtered_covs.push_back(P);
 
     ++age;
     ++time_since_update;
@@ -135,7 +137,8 @@ void Track::predict(int frame_count) {
     history.push_back({frame_count, pos, vel_x});
 }
 
-void Track::update(const Point& z_pt) {
+void Track::update(const Point& z_pt, int frame_count) {
+    last_detection = z_pt;
     Eigen::Vector2d z = z_pt;
     Eigen::Vector2d y = z - H * x;
     Mat2  S = H * P * H.transpose() + R;
@@ -150,6 +153,7 @@ void Track::update(const Point& z_pt) {
 
     filtered_states.push_back(x);
     filtered_covs.push_back(P);
+    history.push_back({frame_count, position(), x(2)});
 }
 
 Point Track::position() const {
@@ -163,12 +167,14 @@ Point Track::velocity() const {
 // ========================= Tracker implementation =========================
 
 Tracker::Tracker(double dt,
+                double scale_lambda,
                  double sigma_a,
                  double sigma_z,
                  double distance_threshold,
                  int max_age,
                  int min_hits)
     : dt_(dt),
+      scale_lambda_(scale_lambda),
       sigma_a_(sigma_a),
       sigma_z_(sigma_z),
       distance_threshold_(distance_threshold),
@@ -212,7 +218,17 @@ void Tracker::greedy_match_small(const std::vector<Point>& A,
         return;
     }
 
-    constexpr int MAXN = 16;  // safe for your ≤15 constraint
+    constexpr int MAXN = 30;  // safe for your ≤15 constraint
+    
+    // CRITICAL: Check bounds to prevent stack buffer overflow
+    if (na > MAXN || nb > MAXN) {
+        std::cerr << "WARNING: greedy_match_small exceeded MAXN=" << MAXN 
+                  << " (na=" << na << ", nb=" << nb << "). Treating all as unmatched.\n";
+        for (int i = 0; i < na; ++i) unmatched_A.push_back(i);
+        for (int j = 0; j < nb; ++j) unmatched_B.push_back(j);
+        return;
+    }
+    
     double cost[MAXN][MAXN];
     bool used_A[MAXN] = {false};
     bool used_B[MAXN] = {false};
@@ -336,7 +352,7 @@ void Tracker::update(std::vector<Point> detections, int frame_count) {
     for (const auto& m : matches) {
         int ti = m.first;
         int dj = m.second;
-        tracks_[ti].update(detections[dj]);
+        tracks_[ti].update(detections[dj], frame_count);
     }
 
     // --- Step 4: age/remove unmatched tracks ---
@@ -354,16 +370,26 @@ void Tracker::update(std::vector<Point> detections, int frame_count) {
 
     for (int idx = 0; idx < static_cast<int>(tracks_.size()); ++idx) {
         Track& t = tracks_[idx];
-        if (is_unmatched[idx]) {
-            if (t.time_since_update <= max_age_) {
-                survivors.push_back(t);
-            } else {
-                double avg_v = get_track_average_velocity(t);
+        bool survivor = true;
+        if ((t.x(0)<30 || t.x(0)>1920)||(is_unmatched[idx] && t.time_since_update > max_age_ )) {
+            survivor = false;
+        }
+        if (survivor) {
+            survivors.push_back(t);
+            continue;
+        }
+        if (t.filtered_states.size() < 2) {
+            continue;
+        }
+        double full_track_dist_px = std::hypot(
+            t.filtered_states.back()(0) - t.filtered_states.front()(0),
+            t.filtered_states.back()(1) - t.filtered_states.front()(1)
+        );
+        double full_track_dist_m = full_track_dist_px * scale_lambda_;
+        if (full_track_dist_m > 10.0) {
+            double avg_v = get_track_average_velocity(t);
                 finished_tracks_.push_back(FinishedTrack{t, avg_v});
                 ++new_finished_tracks_;
-            }
-        } else {
-            survivors.push_back(t);
         }
     }
     tracks_.swap(survivors);
@@ -405,19 +431,7 @@ std::vector<AverageVelocity> Tracker::get_average_velocity_per_track() const {
             continue;
         }
 
-        std::vector<Vec4> xs_s;
-        std::vector<Mat4> Ps_s;
-        kalman_smoother(t->filtered_states, t->filtered_covs,
-                        t->F, t->Q,
-                        xs_s, Ps_s);
-
-        double sum_v = 0.0;
-        for (const auto& x : xs_s) {
-            double vx = x(2);
-            double vy = x(3);
-            sum_v += std::hypot(vx, vy);
-        }
-        double avg_v = sum_v / xs_s.size();
+        double avg_v = get_track_average_velocity(*t);
         results.push_back(AverageVelocity{
             t->id,
             static_cast<int>(t->filtered_states.size()),
@@ -438,14 +452,25 @@ double Tracker::get_track_average_velocity(const Track& track) const {
     kalman_smoother(track.filtered_states, track.filtered_covs,
                     track.F, track.Q,
                     xs_s, Ps_s);
-
-    double sum_v = 0.0;
+    std::vector<double> xs_pos;
+    std::vector<double> ys_pos;
     for (const auto& x : xs_s) {
-        double vx = x(2);
-        double vy = x(3);
-        sum_v += std::hypot(vx, vy);
+        xs_pos.push_back(x(0));
+        ys_pos.push_back(x(1));
     }
-    return sum_v / xs_s.size();
+    
+    std::vector<double> velocities;
+    for (int i = 1; i < static_cast<int>(xs_pos.size())-1; ++i) {
+        double dx = (xs_pos[i+1] - xs_pos[i - 1])/2;
+        double dy = (ys_pos[i+1] - ys_pos[i - 1])/2;
+        double v  = std::hypot(dx, dy) / dt_;
+        velocities.push_back(v);
+    }
+
+    if (velocities.empty()) {
+        return 0.0;
+    }
+    return std::accumulate(velocities.begin(), velocities.end(), 0.0) / velocities.size();
 }
 
 std::vector<FinishedTrack> Tracker::retrieve_finished_tracks() {

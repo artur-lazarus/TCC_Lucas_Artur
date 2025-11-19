@@ -172,13 +172,13 @@ void CameraInterface::allocateBuffers() {
     }
 }
 
-bool CameraInterface::startCapture(long frame_interval) {
+bool CameraInterface::startCapture() {
     try {
         // Set camera controls for 10fps
         libcamera::ControlList controls;
         
         // Set frame duration for 10fps (100,000 microseconds = 100ms)
-        int64_t frame_time = frame_interval; // microseconds
+        int64_t frame_time = 100000; // microseconds
         controls.set(libcamera::controls::FrameDurationLimits, 
                     libcamera::Span<const int64_t, 2>({ frame_time, frame_time }));
 
