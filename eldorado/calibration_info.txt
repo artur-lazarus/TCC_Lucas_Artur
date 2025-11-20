@@ -5,7 +5,7 @@ Vanishing Points:
   Road VP: (1011.42, -17.03)
   Parallel VP: (-81683.08, 803.08)
 
-Focal Length: 2096.68 px
+Focal Length: 2096.72 px
 
 K Matrix:
 [[     2096.7           0         960]
@@ -14,24 +14,24 @@ K Matrix:
 
 Rotation Vectors:
   r1 (road): [   0.023696    -0.25669      0.9662]
-  r2 (across): [   -0.99967   0.0031823    0.025362]
-  r3 (up): [  -0.009585    -0.96649    -0.25653]
+  r2 (across): [   -0.99967   0.0031823    0.025363]
+  r3 (up): [ -0.0095849    -0.96649    -0.25653]
 
 Homography Matrix:
-[[ 0.00069188    -0.20483      221.01]
- [    0.10509     0.13607     -103.98]
- [ 4.5715e-06  0.00046096   0.0032265]]
+[[ 0.00067061    -0.19853      214.21]
+ [    0.10186     0.13203     -100.78]
+ [ 4.5714e-06  0.00046095   0.0032242]]
 
-Output size: 1280 x 369 pixels
+Output size: 1280 x 358 pixels
 Scale lambda: 0.031250 meters/pseudo-unit
 Ground plane bounds (pseudo-units):
-  X: [1.78, 7.66]
+  X: [1.78, 7.85]
   Y: [-0.33, 1.36]
 Warped dimensions in meters:
-  Width: 0.18 m
+  Width: 0.19 m
   Height: 0.05 m
 ROI polygon: [[333, 505], [960, 38], [1164, 448], [1144, 1079], [0, 1079], [0, 784]]
-Lane Y-pixels: [117, 220]
+Lane Y-pixels: [117, 209]
 
 Max width constraint: 40.00 meters
 
@@ -39,38 +39,38 @@ Max width constraint: 40.00 meters
 CALIBRATION TIMING PROFILE
 ==================================================
 
-Step 1: Main movement range calculation: 0.000 sec
-Step 2: ROI polygon calculation: 0.000 sec
-Step 3: Basic intrinsics estimation: 0.135 sec
+Step 1: Main movement range calculation: 40.427 sec
+Step 2: ROI polygon calculation: 64.447 sec
+Step 3: Basic intrinsics estimation: 0.022 sec
 Step 4: ROI mask creation: 0.000 sec
-Step 5: Vanishing point detection: 0.000 sec
-  - VP-u (road direction) detection: 0.000 sec
-  - VP-v (perpendicular) detection: 0.000 sec
+Step 5: Vanishing point detection: 57.146 sec
+  - VP-u (road direction) detection: 23.417 sec
+  - VP-v (perpendicular) detection: 32.947 sec
 Step 6: Focal length & K matrix computation: 0.000 sec
 Step 7: Rotation matrix computation: 0.006 sec
-Step 8: First pass homography computation: 0.010 sec
-Step 9: Scale estimation: 102.094 sec
-Step 10: Second pass homography computation: 0.014 sec
-Step 11: Warped background population: 19.250 sec
-Step 12: Lane detection: 24.439 sec
+Step 8: First pass homography computation: 0.009 sec
+Step 9: Scale estimation: 116.300 sec
+Step 10: Second pass homography computation: 0.011 sec
+Step 11: Warped background population: 17.805 sec
+Step 12: Lane detection: 21.242 sec
 
-TOTAL CALIBRATION TIME: 145.957 sec
+TOTAL CALIBRATION TIME: 317.420 sec
 
 ==================================================
 TIME BREAKDOWN (Percentage)
 ==================================================
 
-Main movement range: 0.0%
-ROI polygon: 0.0%
-Basic intrinsics: 0.1%
+Main movement range: 12.7%
+ROI polygon: 20.3%
+Basic intrinsics: 0.0%
 ROI mask: 0.0%
-VP detection: 0.0%
-  - VP-u: 0.0%
-  - VP-v: 0.0%
+VP detection: 18.0%
+  - VP-u: 7.4%
+  - VP-v: 10.4%
 K matrix: 0.0%
 Rotation matrix: 0.0%
 First pass homography: 0.0%
-Scale estimation: 69.9%
+Scale estimation: 36.6%
 Second pass homography: 0.0%
-Warped background: 13.2%
-Lane detection: 16.7%
+Warped background: 5.6%
+Lane detection: 6.7%

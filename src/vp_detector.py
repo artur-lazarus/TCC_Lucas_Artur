@@ -876,40 +876,19 @@ def estimate_vp_v(vp_u, plate_detector, show_video=False):
                     
                     grad_plate_crop_bgr = cv2.cvtColor(grad_plate_crop, cv2.COLOR_GRAY2BGR)
                     
-                    # Add edge information to the crops
-                    plate_h, plate_w = plate_crop.shape[:2]
-                    info_img = np.zeros((60, plate_w, 3), dtype=np.uint8)
-                    
-                    # Add edge count text
-                    text = f"Edges: {len(plate_lines)} (>={min_length_ratio*100:.0f}% width)"
-                    cv2.putText(info_img, text, (5, 20), 
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
-                    text = f"Plate width: {x2-x1}px, min_length: {int((x2-x1)*min_length_ratio)}px"
-                    cv2.putText(info_img, text, (5, 40), 
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
-                    
-                    # Combine plate crop with info
-                    plate_with_info = np.vstack([plate_crop, info_img])
-                    
-                    # Combine gradient crop with same info
-                    grad_with_info = np.vstack([grad_plate_crop_bgr, info_img.copy()])
-                    
-                    # Combine wireframe with same info if available
-                    images_to_combine = [plate_with_info, grad_with_info]
+                    # Combine images without text overlay - just the three images side by side
+                    # Order: gradient -> wireframe -> edges
+                    images_to_combine = [grad_plate_crop_bgr]
                     if wireframe_crop is not None:
                         wireframe_crop_bgr = cv2.cvtColor(wireframe_crop, cv2.COLOR_GRAY2BGR)
-                        wireframe_with_info = np.vstack([wireframe_crop_bgr, info_img.copy()])
-                        images_to_combine.append(wireframe_with_info)
+                        images_to_combine.append(wireframe_crop_bgr)
+                    images_to_combine.append(plate_crop)
                     
                     # Save all images side by side
                     combined = np.hstack(images_to_combine)
                     plate_output_path = f'test_output/vp_debug/plate_{len(collected_plate_edges):03d}_edges.png'
                     cv2.imwrite(plate_output_path, combined)
                     logging.info(f"Saved plate with edges, gradient, and wireframe to: {plate_output_path}")
-                    
-                    # Also save gradient separately
-                    grad_output_path = f'test_output/vp_debug/gradient/gradient_frame_{frame_count:04d}.jpg'
-                    cv2.imwrite(grad_output_path, grad_plate_crop)
                     
                     # Display combined visualization
                     cv2.imshow('Plate Analysis (Plate | Gradient | Wireframe)', combined)
@@ -980,24 +959,29 @@ def detect_road_and_cross_vps(show_video=False):
         show_video: Display visualization during processing and save debug videos (default: False)
         
     Returns:
-        Tuple of (vpu, vpv) where each is (x, y) coordinates, or (None, None) if failed
+        Tuple of (vpu, vpv, vpu_time, vpv_time) where:
+        - vpu, vpv are (x, y) coordinates, or (None, None, 0.0, 0.0) if failed
+        - vpu_time, vpv_time are timing measurements in seconds
     """
     total_start_time = time.perf_counter()
 
     # -------------------------------------------------------------------------
     # Step 1: Estimate VP-u (Road Direction)
     # -------------------------------------------------------------------------
+    vpu_start = time.perf_counter()
     video.set_intended_fps(30)
     vpu = estimate_vp_u(
         show_video=show_video
     )
     # vpu = (np.float32(1996.7653), np.float32(-516.6893))
+    vpu_time = time.perf_counter() - vpu_start
     
     if vpu is None:
         logging.error("Failed to estimate VP-u. Cannot proceed to VP-v estimation.")
-        return None, None
+        return None, None, 0.0, 0.0
     
-    logging.info(f"\n✓ VP-u (road direction) found: {vpu}\n")
+    logging.info(f"\n✓ VP-u (road direction) found: {vpu}")
+    logging.info(f"  VP-u detection time: {vpu_time:.3f} seconds\n")
     
     # -------------------------------------------------------------------------
     # Step 2: Prepare for VP-v Estimation
@@ -1007,11 +991,12 @@ def detect_road_and_cross_vps(show_video=False):
         plate_detector = PlateDetector(conf_threshold=0.5)
     except Exception as e:
         logging.error(f"Failed to initialize PlateDetector: {e}")
-        return vpu, None
+        return vpu, None, vpu_time, 0.0
     
     # -------------------------------------------------------------------------
     # Step 3: Estimate VP-v (Perpendicular Direction)
     # -------------------------------------------------------------------------
+    vpv_start = time.perf_counter()
     video.set_intended_fps(10)
     vpv = estimate_vp_v(
         vp_u=vpu,
@@ -1019,12 +1004,14 @@ def detect_road_and_cross_vps(show_video=False):
         show_video=show_video
     )
     # vpv = np.array([-83322, 864])
+    vpv_time = time.perf_counter() - vpv_start
     
     if vpv is None:
         logging.error("Failed to estimate VP-v")
-        return vpu, None
+        return vpu, None, vpu_time, 0.0
     
-    logging.info(f"\n✓ VP-v (perpendicular) found: {vpv}\n")
+    logging.info(f"\n✓ VP-v (perpendicular) found: {vpv}")
+    logging.info(f"  VP-v detection time: {vpv_time:.3f} seconds\n")
     
     # -------------------------------------------------------------------------
     # Summary
@@ -1036,10 +1023,12 @@ def detect_road_and_cross_vps(show_video=False):
     logging.info("="*80)
     logging.info(f"VP-u (road direction):    {vpu}")
     logging.info(f"VP-v (perpendicular):     {vpv}")
+    logging.info(f"VP-u detection time:      {vpu_time:.3f} seconds")
+    logging.info(f"VP-v detection time:      {vpv_time:.3f} seconds")
     logging.info(f"Total processing time:    {total_time:.2f} seconds")
     logging.info("="*80)
     
-    return vpu, vpv
+    return vpu, vpv, vpu_time, vpv_time
 
 
 # =============================================================================

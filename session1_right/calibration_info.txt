@@ -1,0 +1,76 @@
+CALIBRATION PARAMETERS
+==================================================
+
+Vanishing Points:
+  Road VP: (1991.09, -522.36)
+  Parallel VP: (-2609.70, 78.52)
+
+Focal Length: 1786.18 px
+
+K Matrix:
+[[     1786.2           0         960]
+ [          0      1786.2         540]
+ [          0           0           1]]
+
+Rotation Vectors:
+  r1 (road): [    0.44444    -0.45792     0.76992]
+  r2 (across): [   -0.88838    -0.11485     0.44452]
+  r3 (up): [   -0.11513    -0.88154    -0.45785]
+
+Homography Matrix:
+[[   0.066135    -0.18091       186.8]
+ [    0.18876     0.25486      -242.7]
+ [ 6.4458e-05  0.00049354     0.12946]]
+
+Output size: 1280 x 311 pixels
+Scale lambda: 0.029208 meters/pseudo-unit
+Ground plane bounds (pseudo-units):
+  X: [0.63, 4.66]
+  Y: [0.52, 1.49]
+Warped dimensions in meters:
+  Width: 0.12 m
+  Height: 0.03 m
+ROI polygon: [[1288, 0], [1676, 0], [1016, 1078], [126, 1079], [230, 788], [393, 661]]
+Lane Y-pixels: [218]
+
+Max width constraint: 40.00 meters
+
+==================================================
+CALIBRATION TIMING PROFILE
+==================================================
+
+Step 1: Main movement range calculation: 41.373 sec
+Step 2: ROI polygon calculation: 70.271 sec
+Step 3: Basic intrinsics estimation: 0.029 sec
+Step 4: ROI mask creation: 0.002 sec
+Step 5: Vanishing point detection: 491.885 sec
+  - VP-u (road direction) detection: 52.859 sec
+  - VP-v (perpendicular) detection: 437.996 sec
+Step 6: Focal length & K matrix computation: 0.000 sec
+Step 7: Rotation matrix computation: 0.008 sec
+Step 8: First pass homography computation: 0.010 sec
+Step 9: Scale estimation: 350.032 sec
+Step 10: Second pass homography computation: 0.000 sec
+Step 11: Warped background population: 9.702 sec
+Step 12: Lane detection: 26.773 sec
+
+TOTAL CALIBRATION TIME: 990.092 sec
+
+==================================================
+TIME BREAKDOWN (Percentage)
+==================================================
+
+Main movement range: 4.2%
+ROI polygon: 7.1%
+Basic intrinsics: 0.0%
+ROI mask: 0.0%
+VP detection: 49.7%
+  - VP-u: 5.3%
+  - VP-v: 44.2%
+K matrix: 0.0%
+Rotation matrix: 0.0%
+First pass homography: 0.0%
+Scale estimation: 35.4%
+Second pass homography: 0.0%
+Warped background: 1.0%
+Lane detection: 2.7%

@@ -553,7 +553,7 @@ def calibrate(show_video=False, max_width_meters=None, target_width_px=1280.0):
     """
     main_movement_range_frame_number = 800
     roi_polygon_frame_number = 800
-    warped_bg_window_size = 400
+    warped_bg_window_size = 800
     get_lanes_frame_number = 800
     
     movement_range_coverage = 0.9
@@ -562,18 +562,18 @@ def calibrate(show_video=False, max_width_meters=None, target_width_px=1280.0):
     min_car_area_m2 = 13.68
 
     timec0 = time.perf_counter()
-    start_angle, end_angle, chosen_bins = get_main_movement_range(
-        main_movement_range_frame_number, 
-        coverage_threshold=movement_range_coverage, 
-        magnitude_threshold=flow_magnitude_threshold,
-        min_weight_threshold=min_weight_threshold)
-    # start_angle, end_angle = 4.50294947014537, 5.654866776461628
+    # start_angle, end_angle, chosen_bins = get_main_movement_range(
+    #     main_movement_range_frame_number, 
+    #     coverage_threshold=movement_range_coverage, 
+    #     magnitude_threshold=flow_magnitude_threshold,
+    #     min_weight_threshold=min_weight_threshold)
+    start_angle, end_angle = 4.50294947014537, 5.654866776461628
 
     timec1 = time.perf_counter()
     print(f"Main movement range calculation time: {timec1 - timec0:.3f} seconds")
     print(f"Main movement range: {start_angle}, {end_angle}")
-    polygon_pts = calculate_roi_polygon(roi_polygon_frame_number, (start_angle, end_angle))
-    # polygon_pts = np.array([[0, 540], [577, 296], [960, 100], [1241, 882], [1154, 1079], [0, 1079]], dtype=np.int32)/
+    # polygon_pts = calculate_roi_polygon(roi_polygon_frame_number, (start_angle, end_angle))
+    polygon_pts = np.array([[333, 505], [960, 38], [1164, 448], [1144, 1079], [0, 1079], [0, 784]], dtype=np.int32)
     timec2 = time.perf_counter()
     print(f"ROI polygon calculation time: {timec2 - timec1:.3f} seconds")
     print(f"ROI polygon: {polygon_pts}")
@@ -594,10 +594,15 @@ def calibrate(show_video=False, max_width_meters=None, target_width_px=1280.0):
     print(f"ROI mask creation time: {timec4 - timec3:.3f} seconds")
 
     # VP calculation
-    road_vp, perpendicular_vp = vp_detector.detect_road_and_cross_vps(show_video=True)
-    # vpu = (np.float32(1018.9128), np.float32(-13.503599))
-    # vpv = [     -47815,      933.28]
-    # road_vp, perpendicular_vp = vpu, vpv
+    timec5 = time.perf_counter()
+    # road_vp, perpendicular_vp, vpu_time, vpv_time = vp_detector.detect_road_and_cross_vps(show_video=True)
+    vpu = (1011.42, -17.03)
+    vpv = (-81683.08, 803.08)
+    road_vp, perpendicular_vp, vpu_time, vpv_time = vpu, vpv, 0, 0
+    timec6 = time.perf_counter()
+    print(f"Vanishing point detection time: {timec6 - timec5:.3f} seconds")
+    print(f"  VP-u detection time: {vpu_time:.3f} seconds")
+    print(f"  VP-v detection time: {vpv_time:.3f} seconds")
 
     # Camera calibration
     f = homography.f_from_two_orthogonal_vps(road_vp, perpendicular_vp, cx, cy)
@@ -606,10 +611,15 @@ def calibrate(show_video=False, max_width_meters=None, target_width_px=1280.0):
         [   0.0,     f,    cy],
         [   0.0,   0.0,   1.0]
     ], dtype=np.float64)
+    timec7 = time.perf_counter()
+    print(f"Focal length and K matrix computation time: {timec7 - timec6:.3f} seconds")
 
     r1, r2, r3 = homography.get_rotation_matrix_from_vps(road_vp, perpendicular_vp, K_matrix)
+    timec8 = time.perf_counter()
+    print(f"Rotation matrix computation time: {timec8 - timec7:.3f} seconds")
     
     # FIRST PASS: Build initial homography to estimate scale
+    timec9 = time.perf_counter()
     print("\n=== FIRST PASS: Initial homography for scale estimation ===")
     H_img_to_plane, initial_bounds = homography.compute_ground_plane_bounds(
         frame.shape, K_matrix, r1, r2, roi_polygon=polygon_pts
@@ -626,12 +636,16 @@ def calibrate(show_video=False, max_width_meters=None, target_width_px=1280.0):
     print(f"Initial scale: {scale_initial:.6f} pseudo-unit/pixels")
     
     video.set_warping_configs(H_matrix_initial, W_out_initial, H_out_initial)
+    timec10 = time.perf_counter()
+    print(f"First pass homography computation time: {timec10 - timec9:.3f} seconds")
     
     vertical_vp = _compute_vp3_from_vp1_vp2(road_vp, perpendicular_vp, K_matrix)
 
     # Scale calculation (meters per pseudo-unit)
     scale_lambda = estimate_scale.estimate_scale(road_vp, perpendicular_vp, vertical_vp, show_video, True)
-    # scale_lambda = 0.648167
+    # scale_lambda = 0.029208
+    timec11 = time.perf_counter()
+    print(f"Scale estimation time: {timec11 - timec10:.3f} seconds")
     print(f"\nEstimated scale: {scale_lambda:.6f} meters/pseudo-unit")
     
     # Calculate initial width in meters
@@ -640,6 +654,7 @@ def calibrate(show_video=False, max_width_meters=None, target_width_px=1280.0):
     print(f"Initial width: {width_meters:.2f} meters ({width_pseudo_units:.2f} pseudo-units)")
     
     # SECOND PASS: Rebuild homography with max_width constraint if provided
+    timec12 = time.perf_counter()
     if max_width_meters is not None and width_meters > max_width_meters:
         print(f"\n=== SECOND PASS: Rebuilding homography with max_width={max_width_meters}m ===")
         
@@ -674,6 +689,8 @@ def calibrate(show_video=False, max_width_meters=None, target_width_px=1280.0):
               if max_width_meters is not None else "\n=== No max_width constraint specified ===")
         H_matrix, W_out, H_out = H_matrix_initial, W_out_initial, H_out_initial
         used_bounds = initial_bounds
+    timec13 = time.perf_counter()
+    print(f"Second pass homography computation time: {timec13 - timec12:.3f} seconds")
     
     if perpendicular_vp[0] < cx:
         H_matrix = np.array([
@@ -683,20 +700,31 @@ def calibrate(show_video=False, max_width_meters=None, target_width_px=1280.0):
                             ], dtype=float) @ H_matrix
     
     # Populate background with final warping
+    timec14 = time.perf_counter()
     background_warped = background.Background(W_out, H_out, warped_bg_window_size)
     for _ in range(warped_bg_window_size):
         if _ % 50 == 0:
             print(f"Warped background population frame {_}/{warped_bg_window_size}")
         frame_warped = video.get_frame_warped()[1]
         background_warped.update(frame_warped)
+    timec15 = time.perf_counter()
+    print(f"Warped background population time: {timec15 - timec14:.3f} seconds")
     cv2.imwrite("test_output/calibration_debug/warped_example.png", frame_warped)
     print("Saved: test_output/calibration_debug/warped_example.png")
     
     min_car_area_px = int((min_car_area_m2 / (scale_lambda ** 2)))
+    timec16 = time.perf_counter()
     lanes_y_pxs = get_lanes_y_pxs(get_lanes_frame_number, background_warped, min_car_area_px)
+    # lanes_y_pxs = [218]
+    timec17 = time.perf_counter()
+    print(f"Lane detection time: {timec17 - timec16:.3f} seconds")
     print(f"Lane Y pixels: {lanes_y_pxs}")
 
-    # Save calibration info
+    # Calculate total time
+    timec_total = time.perf_counter()
+    total_calibration_time = timec_total - timec0
+    
+    # Save calibration info with timing data
     with open("test_output/calibration_debug/calibration_info.txt", "w") as fout:
         fout.write("CALIBRATION PARAMETERS\n")
         fout.write("=" * 50 + "\n\n")
@@ -724,7 +752,48 @@ def calibrate(show_video=False, max_width_meters=None, target_width_px=1280.0):
         fout.write(f"Lane Y-pixels: {lanes_y_pxs}\n")
         if max_width_meters is not None:
             fout.write(f"\nMax width constraint: {max_width_meters:.2f} meters\n")
+        
+        # Add timing information
+        fout.write("\n" + "=" * 50 + "\n")
+        fout.write("CALIBRATION TIMING PROFILE\n")
+        fout.write("=" * 50 + "\n\n")
+        fout.write(f"Step 1: Main movement range calculation: {timec1 - timec0:.3f} sec\n")
+        fout.write(f"Step 2: ROI polygon calculation: {timec2 - timec1:.3f} sec\n")
+        fout.write(f"Step 3: Basic intrinsics estimation: {timec3 - timec2:.3f} sec\n")
+        fout.write(f"Step 4: ROI mask creation: {timec4 - timec3:.3f} sec\n")
+        fout.write(f"Step 5: Vanishing point detection: {timec6 - timec5:.3f} sec\n")
+        fout.write(f"  - VP-u (road direction) detection: {vpu_time:.3f} sec\n")
+        fout.write(f"  - VP-v (perpendicular) detection: {vpv_time:.3f} sec\n")
+        fout.write(f"Step 6: Focal length & K matrix computation: {timec7 - timec6:.3f} sec\n")
+        fout.write(f"Step 7: Rotation matrix computation: {timec8 - timec7:.3f} sec\n")
+        fout.write(f"Step 8: First pass homography computation: {timec10 - timec9:.3f} sec\n")
+        fout.write(f"Step 9: Scale estimation: {timec11 - timec10:.3f} sec\n")
+        fout.write(f"Step 10: Second pass homography computation: {timec13 - timec12:.3f} sec\n")
+        fout.write(f"Step 11: Warped background population: {timec15 - timec14:.3f} sec\n")
+        fout.write(f"Step 12: Lane detection: {timec17 - timec16:.3f} sec\n")
+        fout.write(f"\nTOTAL CALIBRATION TIME: {total_calibration_time:.3f} sec\n")
+        
+        # Add percentage breakdown
+        fout.write("\n" + "=" * 50 + "\n")
+        fout.write("TIME BREAKDOWN (Percentage)\n")
+        fout.write("=" * 50 + "\n\n")
+        fout.write(f"Main movement range: {(timec1 - timec0) / total_calibration_time * 100:.1f}%\n")
+        fout.write(f"ROI polygon: {(timec2 - timec1) / total_calibration_time * 100:.1f}%\n")
+        fout.write(f"Basic intrinsics: {(timec3 - timec2) / total_calibration_time * 100:.1f}%\n")
+        fout.write(f"ROI mask: {(timec4 - timec3) / total_calibration_time * 100:.1f}%\n")
+        fout.write(f"VP detection: {(timec6 - timec5) / total_calibration_time * 100:.1f}%\n")
+        fout.write(f"  - VP-u: {vpu_time / total_calibration_time * 100:.1f}%\n")
+        fout.write(f"  - VP-v: {vpv_time / total_calibration_time * 100:.1f}%\n")
+        fout.write(f"K matrix: {(timec7 - timec6) / total_calibration_time * 100:.1f}%\n")
+        fout.write(f"Rotation matrix: {(timec8 - timec7) / total_calibration_time * 100:.1f}%\n")
+        fout.write(f"First pass homography: {(timec10 - timec9) / total_calibration_time * 100:.1f}%\n")
+        fout.write(f"Scale estimation: {(timec11 - timec10) / total_calibration_time * 100:.1f}%\n")
+        fout.write(f"Second pass homography: {(timec13 - timec12) / total_calibration_time * 100:.1f}%\n")
+        fout.write(f"Warped background: {(timec15 - timec14) / total_calibration_time * 100:.1f}%\n")
+        fout.write(f"Lane detection: {(timec17 - timec16) / total_calibration_time * 100:.1f}%\n")
+    
     print("Saved: test_output/calibration_debug/calibration_info.txt")
+    print(f"\nTOTAL CALIBRATION TIME: {total_calibration_time:.3f} seconds")
 
     roi_area = cv2.contourArea(polygon_pts)
     M = cv2.moments(polygon_pts)
@@ -745,7 +814,7 @@ def calibrate(show_video=False, max_width_meters=None, target_width_px=1280.0):
 
 if __name__ == "__main__":
     time0 = time.perf_counter()
-    input_video_path = "assets/video.avi"
+    input_video_path = "assets/combined_all_videos.mp4"
     colour = False
     target_fps = 10
     video_background_window_size = 800

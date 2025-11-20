@@ -12,6 +12,40 @@ def start_cpp_detection(json_calibration_path):
     detection_file_path = "cpp/src/main_app"
     subprocess.run(["./" + detection_file_path, json_calibration_path])
 
+def load_calibration_file(path):
+    """
+    Loads calibration parameters from a JSON file.
+
+    Parameters
+    ----------
+    path : str
+        Input JSON file path.
+
+    Returns
+    -------
+    tuple
+        (H_matrix, roi_polygon, H_out, W_out, lanes_y_pxs, scale_lambda)
+        where H_matrix is a numpy 3x3 array and roi_polygon is a list of tuples.
+    """
+    with open(path, "r") as f:
+        data = json.load(f)
+    
+    # Convert H_matrix to numpy array
+    H_matrix = np.array(data["H_matrix"], dtype=np.float64)
+    
+    # Convert roi_polygon to list of tuples
+    roi_polygon = [(float(x), float(y)) for x, y in data["roi_polygon"]]
+    
+    H_out = int(data["H_out"])
+    W_out = int(data["W_out"])
+    lanes_y_pxs = [int(v) for v in data["lanes_y_pxs"]]
+    scale_lambda = float(data["scale_lambda"])
+    
+    print(f"Calibration loaded from {path}")
+    
+    return H_matrix, roi_polygon, H_out, W_out, lanes_y_pxs, scale_lambda
+
+
 def write_calibration_file(
     path,
     H_matrix,
@@ -64,12 +98,14 @@ def write_calibration_file(
 
 
 def main():
+    # Configuration flags
     cpp_detection = False  # Set to True to run C++ detection instead of Python detection
+    load_calibration_from_file = False  # Set to True to load calibration from JSON instead of running calibration
     cpp_file = "cpp/src/tcc"
 
     time0 = time.perf_counter()
-    input_video_path = "assets/video.avi"
-    json_calibration_path = "final_debug/calibration.json"
+    input_video_path = "assets/combined_all_videos.mp4"
+    json_calibration_path = "test_output/eldorado.json"
     colour = False
     start_frame = 0
     target_fps = 10
@@ -96,6 +132,7 @@ def main():
     print(f"Video instantiation time: {time2 - time1:.3f} seconds")
 
     # Background population
+    last_time = time.perf_counter()
     for _ in range(video_background_window_size):
         if _ % 50 == 0:
             print(f"Background population: {_}/{video_background_window_size} - {time.perf_counter() - last_time:.3f}sec")
@@ -103,11 +140,32 @@ def main():
         video.get_frame()
     time3 = time.perf_counter()
 
-    # Calibration
+    # Calibration - either run calibration or load from file
     print(f"Initial background population time: {time3 - time2:.3f} seconds")
-    H_matrix, roi_polygon, H_out, W_out, lanes_y_pxs, scale_lambda, calibration_background_object = calibration.calibrate(show_video=True, max_width_meters=max_road_length)
-    time4 = time.perf_counter()
-    print(f"Calibration computation time: {time4 - time3:.3f} seconds")
+    
+    if load_calibration_from_file:
+        # Load calibration from JSON file
+        print(f"Loading calibration from {json_calibration_path}...")
+        H_matrix, roi_polygon, H_out, W_out, lanes_y_pxs, scale_lambda = load_calibration_file(json_calibration_path)
+        calibration_background_object = video._background  # Use video's background object
+        time4 = time.perf_counter()
+        print(f"Calibration load time: {time4 - time3:.3f} seconds")
+    else:
+        # Run calibration
+        H_matrix, roi_polygon, H_out, W_out, lanes_y_pxs, scale_lambda, calibration_background_object = calibration.calibrate(show_video=True, max_width_meters=max_road_length)
+        time4 = time.perf_counter()
+        print(f"Calibration computation time: {time4 - time3:.3f} seconds")
+        
+        # Save calibration to JSON file
+        write_calibration_file(
+            json_calibration_path,
+            H_matrix,
+            roi_polygon,
+            H_out,
+            W_out,
+            lanes_y_pxs,
+            scale_lambda
+        )
 
     if not cpp_detection:
         # Detection
@@ -177,16 +235,8 @@ def main():
             json.dump(tracks_data, fout, indent=2)
         print(f"Saved: final_debug/tracks.json ({len(tracks_data['cars'])} cars)")
     else:
-        write_calibration_file(
-            json_calibration_path,
-            H_matrix,
-            roi_polygon,
-            H_out,
-            W_out,
-            lanes_y_pxs,
-            scale_lambda
-        )
         #start_cpp_detection(json_calibration_path)
+        pass
 
         
 
