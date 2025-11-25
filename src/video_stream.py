@@ -6,7 +6,7 @@ class VideoStream:
     def __init__(self):
         self.roi_mask = None
         self._background = None
-        self.original_fps = 30
+        self.original_fps = 50
 
     def jump_to_frame(self, frame_number):
         self.cap.set(cv2.CAP_PROP_POS_FRAMES, frame_number)

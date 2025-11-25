@@ -553,7 +553,7 @@ def calibrate(show_video=False, max_width_meters=None, target_width_px=1280.0):
     """
     main_movement_range_frame_number = 800
     roi_polygon_frame_number = 800
-    warped_bg_window_size = 800
+    warped_bg_window_size = 400
     get_lanes_frame_number = 800
     
     movement_range_coverage = 0.9
@@ -562,18 +562,18 @@ def calibrate(show_video=False, max_width_meters=None, target_width_px=1280.0):
     min_car_area_m2 = 13.68
 
     timec0 = time.perf_counter()
-    # start_angle, end_angle, chosen_bins = get_main_movement_range(
-    #     main_movement_range_frame_number, 
-    #     coverage_threshold=movement_range_coverage, 
-    #     magnitude_threshold=flow_magnitude_threshold,
-    #     min_weight_threshold=min_weight_threshold)
-    start_angle, end_angle = 4.50294947014537, 5.654866776461628
+    start_angle, end_angle, chosen_bins = get_main_movement_range(
+        main_movement_range_frame_number, 
+        coverage_threshold=movement_range_coverage, 
+        magnitude_threshold=flow_magnitude_threshold,
+        min_weight_threshold=min_weight_threshold)
+    # start_angle, end_angle = (2.0245819323134224, 2.5132741228718345)
 
     timec1 = time.perf_counter()
     print(f"Main movement range calculation time: {timec1 - timec0:.3f} seconds")
     print(f"Main movement range: {start_angle}, {end_angle}")
-    # polygon_pts = calculate_roi_polygon(roi_polygon_frame_number, (start_angle, end_angle))
-    polygon_pts = np.array([[333, 505], [960, 38], [1164, 448], [1144, 1079], [0, 1079], [0, 784]], dtype=np.int32)
+    polygon_pts = calculate_roi_polygon(roi_polygon_frame_number, (start_angle, end_angle))
+    # polygon_pts = np.array([[333, 505], [960, 38], [1164, 448], [1144, 1079], [0, 1079], [0, 784]], dtype=np.int32)
     timec2 = time.perf_counter()
     print(f"ROI polygon calculation time: {timec2 - timec1:.3f} seconds")
     print(f"ROI polygon: {polygon_pts}")
@@ -596,8 +596,8 @@ def calibrate(show_video=False, max_width_meters=None, target_width_px=1280.0):
     # VP calculation
     timec5 = time.perf_counter()
     # road_vp, perpendicular_vp, vpu_time, vpv_time = vp_detector.detect_road_and_cross_vps(show_video=True)
-    vpu = (1011.42, -17.03)
-    vpv = (-81683.08, 803.08)
+    vpu = (1797.3, -312.53)
+    vpv = (-3561.1689984470231, -214.95958600058404)
     road_vp, perpendicular_vp, vpu_time, vpv_time = vpu, vpv, 0, 0
     timec6 = time.perf_counter()
     print(f"Vanishing point detection time: {timec6 - timec5:.3f} seconds")
@@ -639,11 +639,13 @@ def calibrate(show_video=False, max_width_meters=None, target_width_px=1280.0):
     timec10 = time.perf_counter()
     print(f"First pass homography computation time: {timec10 - timec9:.3f} seconds")
     
+    cv2.imwrite("eldorado/warped_example_bad.png", video.get_frame_warped()[1])
+    
     vertical_vp = _compute_vp3_from_vp1_vp2(road_vp, perpendicular_vp, K_matrix)
 
     # Scale calculation (meters per pseudo-unit)
-    scale_lambda = estimate_scale.estimate_scale(road_vp, perpendicular_vp, vertical_vp, show_video, True)
-    # scale_lambda = 0.029208
+    # scale_lambda = estimate_scale.estimate_scale(road_vp, perpendicular_vp, vertical_vp, show_video, True)
+    scale_lambda = 0.029208
     timec11 = time.perf_counter()
     print(f"Scale estimation time: {timec11 - timec10:.3f} seconds")
     print(f"\nEstimated scale: {scale_lambda:.6f} meters/pseudo-unit")
@@ -814,7 +816,7 @@ def calibrate(show_video=False, max_width_meters=None, target_width_px=1280.0):
 
 if __name__ == "__main__":
     time0 = time.perf_counter()
-    input_video_path = "assets/combined_all_videos.mp4"
+    input_video_path = "assets/video.avi"
     colour = False
     target_fps = 10
     video_background_window_size = 800

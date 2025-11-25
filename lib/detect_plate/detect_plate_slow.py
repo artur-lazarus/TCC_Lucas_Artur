@@ -103,14 +103,14 @@ if __name__ == '__main__':
     detector = PlateDetector()
     
     # Load a test image
-    image_path = 'assets/transito-do-Rio.jpg'
+    image_path = 'assets/frame_280.png'
     test_img = cv2.imread(image_path)
     
     if test_img is not None:
         print(f"Running test detection on {image_path} with save_crops=True...")
         # --- Test the new feature ---
         time1 = time.perf_counter()
-        test_boxes = detector.detect(test_img, save_crops=True, save_dir='test_output')
+        test_boxes = detector.detect(test_img, save_crops=True, save_dir='lib/output')
         time2 = time.perf_counter()
         print(f"Test detection took {time2 - time1:.3f} seconds")
         print(f"Test detection complete. Found {len(test_boxes)} boxes.")
